@@ -1,0 +1,73 @@
+# DeepTutor owns this directory. Never edit or delete it.
+.deeptutor/
+
+# Windows/macOS filesystem metadata
+*:Zone.Identifier
+*:Zone.Identifier:$DATA
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Secrets and authenticated browser state
+.env
+.env.*
+!.env.example
+!.env.*.example
+playwright/.auth/
+.auth/
+
+# Python environments, bytecode, caches and build artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# JavaScript dependencies and generated bundles
+node_modules/
+.next/
+.vite/
+.turbo/
+*.tsbuildinfo
+
+# General generated files and local runtime data
+build/
+dist/
+out/
+target/
+coverage/
+.cache/
+.local/
+.runtime/
+work/
+logs/
+artifacts/
+test-results/
+playwright-report/
+data/local/
+*.log
+*.tmp
+*.swp
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.o
+*.obj
+*.class
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Commit dependency lockfiles; do not ignore them.
