@@ -7,8 +7,56 @@ type ItemInput = components["schemas"]["ItemInput"];
 type ProductItem = components["schemas"]["ItemRead"];
 type UpdateTaskTitleRequest = components["schemas"]["UpdateTaskTitleRequest"];
 type UpdateItemTitleRequest = components["schemas"]["UpdateItemTitleRequest"];
+type CaptureSnapshot = components["schemas"]["CaptureSnapshotRead"];
+type CaptureSnapshotSubmit = components["schemas"]["CaptureSnapshotSubmit"];
+type ResearchRun = components["schemas"]["ResearchRunRead"];
+type BrowserPageConnection = components["schemas"]["BrowserPageConnection"];
 
 const API_ROOT = "/api/v1";
+
+type BrowserLogin = components["schemas"]["BrowserLoginRead"];
+function loginPath(taskId: string, itemId: string): string {
+  return `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/browser-login`;
+}
+export function getBrowserLogin(taskId: string, itemId: string): Promise<BrowserLogin | null> {
+  return request(loginPath(taskId, itemId));
+}
+export function openBrowserLogin(taskId: string, itemId: string): Promise<BrowserLogin> {
+  return request(loginPath(taskId, itemId), { method: "POST" });
+}
+export function controlBrowserLogin(taskId: string, itemId: string, id: string, action: "save" | "cancel"): Promise<BrowserLogin> {
+  return request(`${loginPath(taskId, itemId)}/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+}
+
+export function getCollectionStatus(): Promise<components["schemas"]["CollectionAvailability"]> {
+  return request("/collection/status");
+}
+
+export function getBrowserConnections(taskId: string): Promise<BrowserPageConnection[]> {
+  return request(`/browser-captures/status/${encodeURIComponent(taskId)}`);
+}
+
+export function listResearch(taskId: string): Promise<ResearchRun[]> {
+  return request(`/tasks/${encodeURIComponent(taskId)}/research?limit=5`);
+}
+
+export function startResearch(taskId: string, goal: string, key: string): Promise<ResearchRun> {
+  return request(`/tasks/${encodeURIComponent(taskId)}/research`, {
+    method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ goal }),
+  });
+}
+
+export function resumeResearch(taskId: string, runId: string, answer?: string): Promise<ResearchRun> {
+  return request(`/tasks/${encodeURIComponent(taskId)}/research/${encodeURIComponent(runId)}/resume`, {
+    method: "POST", body: JSON.stringify({ answer: answer || null }),
+  });
+}
+
+export function cancelResearch(taskId: string, runId: string): Promise<ResearchRun> {
+  return request(`/tasks/${encodeURIComponent(taskId)}/research/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
 
 export class ApiError extends Error {
   constructor(
@@ -114,5 +162,32 @@ export function removeItem(taskId: string, itemId: string): Promise<void> {
   return request<void>(
     `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}`,
     { method: "DELETE" },
+  );
+}
+
+export function createCaptureSnapshot(
+  taskId: string,
+  itemId: string,
+  payload: CaptureSnapshotSubmit,
+  idempotencyKey: string,
+): Promise<CaptureSnapshot> {
+  return request<CaptureSnapshot>(
+    `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/captures`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify(payload),
+    },
+  );
+}
+
+export function listCaptureSnapshots(
+  taskId: string,
+  itemId: string,
+  limit = 5,
+): Promise<CaptureSnapshot[]> {
+  const boundedLimit = Math.max(1, Math.min(20, Math.trunc(limit)));
+  return request<CaptureSnapshot[]>(
+    `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(itemId)}/captures?limit=${boundedLimit}`,
   );
 }

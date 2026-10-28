@@ -21,12 +21,14 @@ import {
   getTask,
   getReadiness,
   listTasks,
+  listCaptureSnapshots,
   removeItem,
   removeTask,
   updateItemTitle,
   updateTaskTitle,
 } from "./api/client";
 import type { components } from "./api/schema";
+import { ResearchPanel } from "./ResearchPanel";
 
 const { Content, Sider } = Layout;
 const { TextArea } = Input;
@@ -37,9 +39,10 @@ type TaskSummary = components["schemas"]["TaskSummary"];
 type CreateTaskRequest = components["schemas"]["CreateTaskRequest"];
 type ItemInput = components["schemas"]["ItemInput"];
 type ProductItem = components["schemas"]["ItemRead"];
+type CaptureSnapshot = components["schemas"]["CaptureSnapshotRead"];
 
 const TASK_STATUS: Record<string, string> = {
-  open: "待采集",
+  open: "研究任务",
   queued: "排队中",
   running: "处理中",
   needs_input: "需要你确认",
@@ -53,6 +56,8 @@ const ITEM_STATUS: Record<string, string> = {
   collecting: "正在采集",
   needs_attention: "需要你确认",
   complete: "已采集",
+  partial: "部分采集 · 存在缺失字段",
+  blocked: "需要人工处理 · 页面访问受阻",
   failed: "采集失败",
 };
 
@@ -348,7 +353,10 @@ function TaskPage() {
     return <div className="page-frame"><Alert showIcon type="error" message={taskQuery.error instanceof ApiError ? taskQuery.error.message : "无法读取此任务。"} action={<Button onClick={() => void taskQuery.refetch()}>重试</Button>} /></div>;
   }
   const task = taskQuery.data;
-  const collectedCount = task.items.filter((item) => item.capture_status === "complete").length;
+  const collectedCount = task.items.filter((item) => ["complete", "partial", "blocked", "failed"].includes(item.capture_status)).length;
+  const captureIsInProgress = task.items.some((item) => ["queued", "collecting"].includes(item.capture_status));
+  const hasCaptureSnapshot = task.items.some((item) => ["complete", "partial", "blocked", "failed"].includes(item.capture_status));
+  const hasIncompleteCapture = task.items.some((item) => ["partial", "blocked", "failed"].includes(item.capture_status));
   const addItemNotice = url.trim() ? getNonProductPageNotice(url) : null;
 
   return (
@@ -358,7 +366,15 @@ function TaskPage() {
         <div>
           <div className="task-title-meta"><Tag bordered={false} color="green">{TASK_STATUS[task.status] ?? task.status}</Tag><span>创建于 {formatDate(task.created_at)}</span></div>
             <TaskTitleEditor taskId={task.id} title={task.title} />
-          <Text className="page-subtitle">商品信息尚未采集，因此当前没有分析结论。</Text>
+          <Text className="page-subtitle">
+            {captureIsInProgress
+              ? "正在采集商品信息。你可以先说明用途与关注点。"
+              : hasIncompleteCapture
+                ? "已有部分商品资料。研究助手会根据需求判断哪些缺项需要确认。"
+                : hasCaptureSnapshot
+                  ? "商品资料已保存。向研究助手说明你的需求，开始核对与比较。"
+                  : "先说明你的购物需求；助手会提示需要补充的商品资料。"}
+          </Text>
         </div>
         <div className="task-header-actions">
           <div className="extension-hint"><span className="online-dot" /> 在淘宝、天猫或京东商品页，可用悬浮助手单击加入</div>
@@ -379,12 +395,20 @@ function TaskPage() {
       <div className="task-overview-strip">
         <div><span className="overview-value">{task.item_count}</span><span className="overview-label">商品链接</span></div>
         <div><span className="overview-value">{collectedCount} / {task.items.length}</span><span className="overview-label">已采集</span></div>
-        <div className="overview-note"><span className="pending-dot" /> 当前任务只保存链接；采集和分析尚未启动</div>
+        <div className="overview-note"><span className="pending-dot" />
+          {captureIsInProgress
+            ? "商品采集处理中"
+            : hasCaptureSnapshot
+              ? "资料与缺项已记录，研究进度见下方"
+              : "尚无采集快照，助手可帮助确认需要补充的信息"}
+        </div>
       </div>
+
+      <ResearchPanel key={task.id} taskId={task.id} />
 
       <section className="items-section">
         <div className="section-heading">
-          <div><span className="step-label">待采集的商品链接</span><h2>已添加商品 <span className="inline-count">{task.items.length}</span></h2></div>
+          <div><span className="step-label">商品资料与来源</span><h2>已添加商品 <span className="inline-count">{task.items.length}</span></h2></div>
           <span className="section-caption">网页和扩展添加的链接保存在同一个任务中</span>
         </div>
         <div className="product-list">
@@ -404,7 +428,7 @@ function TaskPage() {
 
       <div className="evidence-placeholder">
         <span className="placeholder-mark">i</span>
-        <div><strong>结论将在核对商品信息后生成</strong><p>我们不会在商品信息缺失时给出价格、规格或品牌推荐。</p></div>
+        <div><strong>研究结论保留依据和未知项</strong><p>助手会优先核对影响选择的规格与价格条件，资料不足时给出阶段性结论或向你确认。</p></div>
       </div>
     </div>
   );
@@ -458,6 +482,12 @@ function ProductRow({ taskId, item, index }: { taskId: string; item: ProductItem
   const [editingTitle, setEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState(item.page_title || host);
   const [titleError, setTitleError] = useState<string | null>(null);
+  const [captureOpen, setCaptureOpen] = useState(false);
+  const capturesQuery = useQuery({
+    queryKey: ["captures", taskId, item.id],
+    queryFn: () => listCaptureSnapshots(taskId, item.id, 5),
+    enabled: captureOpen,
+  });
   const updateMutation = useMutation({
     mutationFn: (pageTitle: string) => updateItemTitle(taskId, item.id, { page_title: pageTitle }),
     onSuccess: async () => {
@@ -525,10 +555,93 @@ function ProductRow({ taskId, item, index }: { taskId: string; item: ProductItem
         </div>
         {warning && <div className="product-page-warning"><span className="pending-dot" />{warning}</div>}
         <span className="product-status"><span className="pending-dot" />{ITEM_STATUS[item.capture_status] ?? item.capture_status}</span>
+        {item.capture_status !== "not_started" && (
+          <Button className="capture-details-toggle" type="link" size="small" onClick={() => setCaptureOpen((open) => !open)}>
+            {captureOpen ? "收起采集信息" : "查看采集信息"}
+          </Button>
+        )}
+        {captureOpen && (
+          <div className="capture-details-panel">
+            {capturesQuery.isLoading ? <Skeleton active paragraph={{ rows: 3 }} /> : null}
+            {capturesQuery.isError ? (
+              <Alert type="error" showIcon message={capturesQuery.error instanceof Error ? capturesQuery.error.message : "无法读取采集快照。"} />
+            ) : null}
+            {capturesQuery.data?.length === 0 ? <Alert type="info" showIcon message="尚无采集快照。" /> : null}
+            {capturesQuery.data?.map((snapshot) => <CaptureSnapshotDetails key={snapshot.id} snapshot={snapshot} />)}
+          </div>
+        )}
         {deleteMutation.error instanceof Error && <Alert className="row-alert" type="error" showIcon message={deleteMutation.error.message} />}
       </div>
       <span className="product-date">加入于 {formatDate(item.created_at)}</span>
     </Card>
+  );
+}
+
+function CaptureSnapshotDetails({ snapshot }: { snapshot: CaptureSnapshot }) {
+  const images = snapshot.images ?? [];
+  const fields = snapshot.fields ?? [];
+  const prices = snapshot.prices ?? [];
+  const coverage = snapshot.coverage ?? [];
+  const evidence = snapshot.evidence ?? [];
+  const loadedImages = images.filter((image) => image.status === "observed" && image.loaded).length;
+  const missingCoverage = coverage.filter((entry) => ["missing", "ambiguous", "blocked"].includes(entry.status));
+  const platformLabel = snapshot.platform === "jd" ? "京东" : snapshot.platform === "tmall" ? "天猫" : "淘宝";
+  const captureStatus = snapshot.status === "complete" ? "采集完整" : snapshot.status === "blocked" ? "页面受阻" : snapshot.status === "failed" ? "采集失败" : "部分采集";
+
+  return (
+    <article className="capture-snapshot-card">
+      <div className="capture-snapshot-header">
+        <strong>{platformLabel} · {captureStatus}</strong>
+        <span>{formatDate(snapshot.captured_at)}</span>
+      </div>
+      <div className="capture-snapshot-grid">
+        <div><span>选中规格</span><strong>{snapshot.selected_variant.label || "未能确认规格"}</strong></div>
+        <div><span>已加载商品图</span><strong>{loadedImages} 张 · 仅保存来源和尺寸</strong></div>
+        <div><span>页面价格</span><strong>{prices.length ? prices.map((price) => price.raw_text || "未知价格").join("；") : "未识别"}</strong></div>
+      </div>
+      {snapshot.variant_verification && <Alert className="form-alert" showIcon
+        type={snapshot.variant_verification.status === "selected" ? "success" : "warning"}
+        message={snapshot.variant_verification.status === "selected" ? "本次规格选择已核对" : "本次规格选择尚未核对成功"}
+        description={`${snapshot.variant_verification.note}${snapshot.variant_verification.price_binding === "same_page_state" ? " 已记录选中后同页稳定显示的价格，仍以页面标价条件为准。" : " 尚未确认价格与本次选择的对应关系。"}`} />}
+      {snapshot.variant_catalog?.groups?.length ? <details className="capture-evidence-details">
+        <summary>可选规格 · {snapshot.variant_catalog.groups.length} 组{snapshot.variant_catalog.truncated ? "（部分选项）" : ""}</summary>
+        {snapshot.variant_catalog.groups.map(group => <div key={group.id}><strong>{group.label}</strong><p>
+          {group.options.map(option => <Tag key={option.id} color={option.disabled ? "default" : option.selected ? "green" : undefined}>
+            {option.label}{option.selected ? " · 已选" : ""}{option.disabled ? " · 不可选" : ""}
+          </Tag>)}
+        </p></div>)}
+      </details> : null}
+      {fields.length > 0 && (
+        <div className="capture-field-list">
+          {fields.filter((field) => field.status !== "missing").map((field) => (
+            <div key={field.observation_id}>
+              <span>{field.label || field.field_path}</span>
+              <strong>{field.normalized_value || field.raw_value || "未识别"}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+      {missingCoverage.length > 0 && (
+        <div className="capture-missing-list">
+          <span>需要核对</span>
+          {missingCoverage.map((entry) => <Tag key={entry.field_path} color={entry.status === "blocked" ? "red" : "orange"}>{entry.field_path}: {entry.note || entry.status}</Tag>)}
+        </div>
+      )}
+      <details className="capture-evidence-details">
+        <summary>查看来源证据（{evidence.length} 条）</summary>
+        <ul>
+          {evidence.map((entry) => (
+            <li key={entry.evidence_id}>
+              <strong>{entry.field_path}</strong>
+              <span>{entry.excerpt || "页面来源"}</span>
+              <small>{entry.source} · {entry.locator || "未提供定位器"}</small>
+            </li>
+          ))}
+        </ul>
+        {images.length > 0 && <p>图片内容尚未下载或送入模型；当前记录 {images.length} 条来源引用。</p>}
+        <p>字段证据来自页面 DOM、页面 JSON-LD 或图片元数据；商家展示信息仍需人工核对。</p>
+      </details>
+    </article>
   );
 }
 

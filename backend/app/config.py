@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_api_key: SecretStr | None = None
     llm_model: str | None = None
-    llm_timeout_seconds: float = Field(default=20.0, gt=0, le=90)
+    llm_timeout_seconds: float = Field(default=60.0, gt=0, le=90)
+    browser_timeout_seconds: float = Field(default=55.0, ge=15, le=120)
+    browser_max_scrolls: int = Field(default=6, ge=0, le=12)
+    browser_trust_fake_ip_dns: bool = False
+
+    @property
+    def browser_session_dir(self) -> Path:
+        return self.data_dir / "browser-sessions"
 
     @property
     def database_path(self) -> Path:

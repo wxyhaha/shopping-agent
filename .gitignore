@@ -15,6 +15,7 @@ Desktop.ini
 !.env.*.example
 playwright/.auth/
 .auth/
+browser-sessions/
 
 # Python environments, bytecode, caches and build artifacts
 .venv/

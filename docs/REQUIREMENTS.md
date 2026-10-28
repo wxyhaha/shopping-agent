@@ -78,9 +78,9 @@
 | 后台语言、框架与前端技术 | T020 实施基线为 React + TypeScript + Vite、Ant Design、React Router、TanStack Query；后台 FastAPI + Pydantic | 见 [技术方案](ARCHITECTURE.md)，T020 按维护状态与兼容结果锁定版本 |
 | 扩展目标浏览器 | 用户已确认 Chrome 和 Edge 都需要支持；建议 WXT + React + TypeScript、Manifest V3 | T020 分别实测加载、权限、配对和共享任务流程 |
 | T020 任务保存 | T020 实施基线为 SQLite + SQLAlchemy + Alembic；T060 强化恢复和回归评估 | 刷新、重启、事务和迁移纳入对应阶段验收 |
-| Gemini 接入 | 用户确认 OpenAI Chat Completions 兼容协议和模型 ID `gemini-3.8-flash-high`；中性任务标题提示词已用合成输入调用成功，商品比较能力尚未验证 | 本机私有端点、模型与密钥通过环境变量配置；T040 验证比较场景集成 |
-| 采集与搜索实现 | 建议平台适配器、扩展当前页采集及 Playwright 浏览器工具；权限与真实覆盖待验证 | T020 提前探查淘宝/京东关键路径，T030/T050 完整实现；不假定共享登录或开放 API 覆盖 |
-| Agent 编排 | LangGraph 为候选实现；商品规则与工具校验独立实现 | T020 验证渠道、检查点与执行器适配；T040/T050 根据结果接入持久化、人工介入和运行记录 |
+| Gemini 接入 | 用户确认 OpenAI Chat Completions 兼容协议和模型 ID `gemini-3.8-flash-high`；已接入研究工具循环并完成一次真实商品报告，推荐质量仍需持续评估 | 本机私有端点、模型与密钥通过环境变量配置；按 T035/T040 固定真实案例持续评估 |
+| 采集与搜索实现 | 研究默认后台 Playwright 独立打开任务商品链接，扩展保留为加入及接管通道；共享 DOM/JSON-LD 与规格目录解析。用户可手动保存独立会话，不复制日常浏览器配置 | 无需预先打开商品页；已接入受控选择规格及同页价格核验，当前天猫样本通过。其他布局、京东实页、图片理解、搜索与开放 API 尚待验证或接入；见 [规格核验](AUTOMATIC_VARIANTS.md) |
+| Agent 编排 | 用户确认提前建立 Agent 主线；T035 已采用 LangGraph、SQLite 检查点与受控工具循环，商品规则与工具校验独立实现 | 先验收真实商品研究，再接浏览器补读及搜索；不等待所有采集字段齐全。见 [Agent 研究记录](AGENT_RESEARCH.md) |
 | 服务与浏览器运行位置 | 建议后台运行在 WSL，Windows 的 Chrome、Edge 访问；连接与 Docker 挂载尚未验证 | T020 核对端口和服务可达性；T070 验证容器挂载及 Windows 本机恢复 |
 | 类似规格定义 | 硬条件与偏好的机制已提出，交互与匹配容差待讨论 | T010/T050 结合真实商品确认 |
 | 分阶段验收数字 | PLAN 为可评审草案 | 实施前确认样本、数量、成功条件和时间预期 |

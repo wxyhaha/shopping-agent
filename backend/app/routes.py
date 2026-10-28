@@ -4,16 +4,19 @@ import re
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.capture_urls import product_url_identity, safe_product_image_url
 from app.database import get_session
-from app.models import ProductItem, Task, utc_now
+from app.models import AgentRun, CaptureSnapshot, ProductItem, Task, utc_now
 from app.schemas import (
     AddItemRequest,
+    CaptureSnapshotRead,
+    CaptureSnapshotSubmit,
     CreateTaskRequest,
     ItemInput,
     ItemRead,
@@ -53,6 +56,16 @@ def item_to_read(item: ProductItem) -> ItemRead:
         browser=item.browser,
         capture_status=item.capture_status,
         created_at=item.created_at,
+    )
+
+
+def capture_to_read(capture: CaptureSnapshot) -> CaptureSnapshotRead:
+    return CaptureSnapshotRead(
+        **capture.payload,
+        id=capture.id,
+        item_id=capture.item_id,
+        platform=capture.platform,
+        received_at=capture.received_at,
     )
 
 
@@ -115,6 +128,22 @@ def replay_or_conflict(
     )
 
 
+def normalized_capture_payload(
+    payload: CaptureSnapshotSubmit,
+    *,
+    page_url: str,
+    canonical_url: str | None,
+) -> dict[str, object]:
+    value = payload.model_dump(mode="json")
+    # Preserve legacy schema-v1 idempotency hashes when optional variant data is absent.
+    for key in ("variant_catalog", "variant_verification"):
+        if value.get(key) is None:
+            value.pop(key, None)
+    value["page_url"] = page_url
+    value["canonical_url"] = canonical_url
+    return value
+
+
 @router.get("/tasks", response_model=list[TaskSummary], tags=["tasks"])
 def list_tasks(
     response: Response,
@@ -163,14 +192,18 @@ def get_task(
 )
 def delete_task(
     task_id: str,
+    request: Request,
     response: Response,
     session: SessionDependency,
 ) -> Response:
     task = session.get(Task, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="比较任务不存在。")
+    run_ids = list(session.scalars(select(AgentRun.id).where(AgentRun.task_id == task_id)))
     session.delete(task)
     session.commit()
+    runtime = request.app.state.research_runtime
+    runtime.delete_checkpoints([run_id for run_id in run_ids if not runtime.is_active(run_id)])
     response.headers["Cache-Control"] = "no-store"
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
@@ -294,6 +327,184 @@ def add_item(
     session.refresh(item)
     response.headers["Cache-Control"] = "no-store"
     return item_to_read(item)
+
+
+@router.post(
+    "/tasks/{task_id}/items/{item_id}/captures",
+    response_model=CaptureSnapshotRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["captures"],
+)
+def create_capture_snapshot(
+    task_id: str,
+    item_id: str,
+    payload: CaptureSnapshotSubmit,
+    response: Response,
+    session: SessionDependency,
+    idempotency_key: IdempotencyHeader = None,
+) -> CaptureSnapshotRead:
+    return persist_capture_snapshot(task_id, item_id, payload, response, session, idempotency_key)
+
+
+def persist_capture_snapshot(
+    task_id: str,
+    item_id: str,
+    payload: CaptureSnapshotSubmit,
+    response: Response,
+    session: Session,
+    idempotency_key: str | None,
+    *,
+    commit: bool = True,
+) -> CaptureSnapshotRead:
+    key = validate_idempotency_key(idempotency_key)
+    item = session.scalar(
+        select(ProductItem).where(ProductItem.id == item_id, ProductItem.task_id == task_id)
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="商品链接不存在。")
+
+    item_identity = product_url_identity(item.url)
+    page_identity = product_url_identity(payload.page_url)
+    if (
+        item_identity is None
+        or page_identity is None
+        or item_identity.platform != page_identity.platform
+        or item_identity.product_id != page_identity.product_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="采集页面必须是已保存的淘宝、天猫或京东同一商品。",
+        )
+    if not payload.adapter_id.startswith(f"{item_identity.platform}-"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="采集适配器与商品平台不匹配。",
+        )
+
+    canonical_identity = (
+        product_url_identity(payload.canonical_url) if payload.canonical_url else None
+    )
+    if payload.canonical_url and (
+        canonical_identity is None
+        or canonical_identity.platform != item_identity.platform
+        or canonical_identity.product_id != item_identity.product_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="规范链接必须指向已保存的同一商品。",
+        )
+
+    stored_payload = normalized_capture_payload(
+        payload,
+        page_url=page_identity.safe_url,
+        canonical_url=canonical_identity.safe_url if canonical_identity else None,
+    )
+    for image in stored_payload["images"]:
+        source_url = image.get("source_url")
+        if source_url:
+            safe_url = safe_product_image_url(source_url)
+            if safe_url is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="商品图片来源必须来自支持平台的公开图片 CDN。",
+                )
+            image["source_url"] = safe_url
+    serialized = json.dumps(
+        stored_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(serialized.encode("utf-8")) > 512 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="采集快照超过 512 KiB 上限。",
+        )
+    request_hash = hashlib.sha256(f"{task_id}:{item_id}:{serialized}".encode()).hexdigest()
+
+    existing = session.scalar(select(CaptureSnapshot).where(CaptureSnapshot.idempotency_key == key))
+    if existing is not None:
+        if existing.request_hash != request_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="幂等键已用于不同采集数据，请重新提交。",
+            )
+        response.status_code = status.HTTP_200_OK
+        response.headers["Cache-Control"] = "no-store"
+        return capture_to_read(existing)
+
+    received_at = utc_now()
+    snapshot = CaptureSnapshot(
+        item_id=item_id,
+        platform=item_identity.platform,
+        adapter_id=payload.adapter_id,
+        adapter_version=payload.adapter_version,
+        status=payload.status,
+        captured_at=payload.captured_at,
+        received_at=received_at,
+        page_url=page_identity.safe_url,
+        canonical_url=canonical_identity.safe_url if canonical_identity else None,
+        schema_version=payload.schema_version,
+        payload=stored_payload,
+        idempotency_key=key,
+        request_hash=request_hash,
+    )
+    item.capture_status = payload.status
+    task = session.get(Task, task_id)
+    if task is not None:
+        task.updated_at = received_at
+    session.add(snapshot)
+    try:
+        if commit:
+            session.commit()
+        else:
+            session.flush()
+    except IntegrityError:
+        session.rollback()
+        existing = session.scalar(
+            select(CaptureSnapshot).where(CaptureSnapshot.idempotency_key == key)
+        )
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="采集快照写入发生并发冲突，请刷新后重试。",
+            ) from None
+        if existing.request_hash != request_hash:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="幂等键已用于不同采集数据，请重新提交。",
+            ) from None
+        response.status_code = status.HTTP_200_OK
+        response.headers["Cache-Control"] = "no-store"
+        return capture_to_read(existing)
+
+    session.refresh(snapshot)
+    response.headers["Cache-Control"] = "no-store"
+    return capture_to_read(snapshot)
+
+
+@router.get(
+    "/tasks/{task_id}/items/{item_id}/captures",
+    response_model=list[CaptureSnapshotRead],
+    tags=["captures"],
+)
+def list_capture_snapshots(
+    task_id: str,
+    item_id: str,
+    response: Response,
+    session: SessionDependency,
+    limit: Annotated[int, Query(ge=1, le=20)] = 5,
+) -> list[CaptureSnapshotRead]:
+    item_exists = session.scalar(
+        select(ProductItem.id).where(ProductItem.id == item_id, ProductItem.task_id == task_id)
+    )
+    if item_exists is None:
+        raise HTTPException(status_code=404, detail="商品链接不存在。")
+    captures = session.scalars(
+        select(CaptureSnapshot)
+        .where(CaptureSnapshot.item_id == item_id)
+        .order_by(CaptureSnapshot.received_at.desc(), CaptureSnapshot.id.desc())
+        .limit(limit)
+    ).all()
+    response.headers["Cache-Control"] = "no-store"
+    return [capture_to_read(capture) for capture in captures]
 
 
 @router.patch(

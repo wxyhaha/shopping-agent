@@ -1,13 +1,15 @@
 {
   "name": "shopping-agent-frontend",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "typegen": "openapi-typescript ../contracts/openapi.json --output src/api/schema.d.ts",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && wxt prepare && tsc --noEmit -p tsconfig.extension.json",
+    "test:bridge": "node --experimental-strip-types --test tests/capture-bridge.test.mjs",
     "build:web": "vite build",
+    "build:collector": "node scripts/build-collector.mjs",
     "build:chrome": "wxt build --browser chrome",
     "build:edge": "wxt build --browser edge"
   },

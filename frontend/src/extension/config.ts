@@ -1,5 +1,6 @@
 export const BACKEND_STORAGE_KEY = "shoppingAgentBackendUrl";
 export const LAST_TASK_STORAGE_KEY = "shoppingAgentLastTaskId";
+export const CAPTURE_CLIENT_STORAGE_KEY = "shoppingAgentCaptureClientId";
 export const DEFAULT_BACKEND_URL = "http://127.0.0.1:8000";
 
 export function validateBackendUrl(value: string): string {
