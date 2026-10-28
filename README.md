@@ -12,13 +12,23 @@
 
 详细需求与未决事项见 [需求说明](docs/REQUIREMENTS.md)。分阶段范围、学习任务、验收草案和任务状态见 [开发计划](PLAN.md)。
 
-T010 的架构、数据流和数据契约见 [技术方案](docs/ARCHITECTURE.md)。T020 按 React + TypeScript 网页、WXT 扩展、FastAPI 后台、SQLite 持久化方案实施；Chrome、Edge 均需支持。依赖版本、模型与平台采集适配仍待验证。
+T010 的架构、数据流和数据契约见 [技术方案](docs/ARCHITECTURE.md)。T020 已建立 React + TypeScript 网页、WXT 扩展、FastAPI 后台、SQLite 持久化和 OpenAPI 类型生成链路；Chrome、Edge 构建成功，用户确认本轮人工验收通过。真实商品采集尚未实现，进入 T030；当前限制记录在 [T020 探针记录](docs/T020_PROBES.md)。
 
-## 当前实际能力
+## 当前已交付能力
 
-当前仅有协作、需求、计划和技术方案草案，以及跨平台文本与 Git 过滤配置。
+- 网页可创建、列出、打开比较任务，并添加 1–20 条商品链接；任务详情可二次确认删除任务，任务内商品链接随任务一起删除；数据通过 SQLite/Alembic 持久化，服务重启后仍可读取。
+- 任务名和商品页标题可编辑；商品链接以短文本呈现，可打开详情或从任务移除。购物车、订单和账号页链接会提示用户核对。
+- 未填写新任务名称时，后台仅在创建任务时调用 OpenAI Chat Completions 兼容网关生成品类/用途级比较名称，不把某个商品的品牌或完整标题作为任务名。之后添加、编辑或移除商品不会自动改名，任务名仍可手动编辑。原始 URL 不发送给模型；仅提供 URL 的网页表单尚未读取页面标题，因此该入口需要填写任务名称。
+- API 校验 URL、标题和入口字段；创建与加项请求支持幂等重放，相同幂等键配不同内容返回冲突。
+- WXT 扩展在淘宝、天猫和京东页面右下方固定显示隔离的悬浮面板；用户可选择或沿用上次任务，单击即可将商品详情页加入同一后台任务，或直接创建新任务。面板只读取页面标题供预览，只有用户点击添加后才提交标题和 URL；不会抓取商品正文或启动分析。
+- 网页、扩展的请求类型来自 FastAPI OpenAPI 契约；Chrome、Edge 的 MV3 构建分别成功。
+- 当前列表状态明确显示“链接已加入；尚未采集；尚未分析”。淘宝/京东抓取、商品模型比较和跨品牌替代搜索尚未实现。当前中性命名提示词已用单商品合成标题调用网关，返回“家用网线比较”；没有创建或修改任务。T020 的网页、扩展和任务删除人工验收由用户确认通过。
 
-尚无业务源码、网页、浏览器扩展、模型调用、依赖清单、锁文件或启动脚本；没有完成真实商品采集或 Windows 运行验收。以 [当前状态](STATUS.md) 为准。
+自动化检查、构建及 Windows localhost 连通结果见 [当前状态](STATUS.md) 与 [T020 探针记录](docs/T020_PROBES.md)。用户已确认 T020 本轮验收通过。真实商品采集、商品比较模型能力、Windows 本机独立恢复和 Docker 伴读尚未验收。
+
+## 已锁定技术版本
+
+依赖完整版本写入 `backend/uv.lock` 和 `frontend/package-lock.json`。当前基线包括 Python 3.10.12、Node.js 24.22.1、FastAPI 0.162.0、SQLAlchemy 2.0.55、Alembic 1.20.1、React 19.3.1、TypeScript 5.9.3、Vite 8.3.5、WXT 0.21.5 和 Ant Design 6.6.8。完整清单与探针结果见 [T020 探针记录](docs/T020_PROBES.md)。
 
 ## 环境与路径
 
@@ -35,15 +45,55 @@ T010 的架构、数据流和数据契约见 [技术方案](docs/ARCHITECTURE.md
 cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent
 ~~~
 
-技术栈尚待讨论。以下入口不预先编造命令：
+### WSL 开发启动
 
-| 操作 | 当前入口 | 验证边界 |
+准备 Python 3.10+、uv 和 Node.js 24.22.1（见 `.nvmrc`），在 WSL 开两个终端。
+
+终端一启动后台：
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/backend
+uv sync --all-groups
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+~~~
+
+终端二启动网页开发服务器：
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/frontend
+npm ci
+npm run dev
+~~~
+
+浏览器打开 `http://127.0.0.1:5173/`。Vite 会把 `/api` 和 `/health` 请求代理到后台。执行生产网页构建后，FastAPI 也会在 `http://127.0.0.1:8000/` 提供网页。
+
+修改 API 数据模型后，从后台目录重新生成共享契约，再在前端生成 TypeScript 类型：
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/backend
+uv run python -m scripts.export_openapi ../contracts/openapi.json
+~~~
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/frontend
+npm run typegen
+npm run typecheck
+npm run build:web
+npm run build:chrome
+npm run build:edge
+~~~
+
+Chrome 的未打包目录为 `frontend/.output/chrome-mv3`，Edge 为 `frontend/.output/edge-mv3`。在各浏览器扩展管理页打开开发者模式并选择对应目录可进行本机加载。改动扩展权限或内容脚本后需在扩展管理页重新加载扩展，并刷新已打开的商品页。扩展默认访问 `http://127.0.0.1:8000`；使用 Vite 开发页时，在扩展弹窗的“本地服务地址”中改为 `http://127.0.0.1:5173`。用户确认本轮扩展和任务管理人工验收通过。
+
+SQLite 文件位于服务所在系统的 `platformdirs` 用户数据目录。需要指定其他路径时，在启动后台前设置 `SHOPPING_AGENT_DATA_DIR`；不要让 Windows 与 WSL 同时跨文件访问同一个 SQLite 文件。
+
+| 操作 | 命令/入口 | 验证边界 |
 | --- | --- | --- |
-| 安装与恢复依赖 | T020 按方案建立项目依赖清单与锁文件 | 未执行 |
-| 启动后台与网页 | 待实现 | 未执行 |
-| 加载浏览器扩展 | Chrome、Edge 均为目标浏览器，待实现后分别验证 | 未执行 |
-| 配置 Gemini | 待核实调用地址、协议、模型标识和能力 | 未执行 |
-| 执行应用检查与打包 | 待实现 | 未执行 |
+| 安装依赖 | 后台 `uv sync --all-groups`；前端 `npm ci` | WSL 已执行；Windows 独立恢复未验收 |
+| 启动后台与网页 | `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`；`npm run dev` | 后台迁移、静态网页与 Windows localhost 连通已检查 |
+| 构建浏览器扩展 | `npm run build:chrome`；`npm run build:edge` | Chrome、Edge 页面内添加流程已由用户确认本轮验收通过 |
+| 配置标题生成 | 设置 `SHOPPING_AGENT_LLM_BASE_URL`、`SHOPPING_AGENT_LLM_MODEL`，密钥通过私有环境变量 `SHOPPING_AGENT_LLM_API_KEY` 提供；本地可放入根目录 `.env` | 当前本机私有配置已设置；模型 ID 为 `gemini-3.8-flash-high`，已有合成标题请求成功记录 |
+| 执行应用检查 | `uv run pytest`、Ruff、`npm run typecheck` 及构建脚本 | API 8 项检查、Ruff、类型检查、网页及双浏览器构建已通过 |
 
 依赖安装说明优先使用 WSL 终端。未来增加 Shell 脚本时，首行必须为 #!/usr/bin/env bash，并在此补充使用实际脚本文件名的 chmod +x 命令。Windows 本机恢复说明需在真实验证后补齐，不能以 WSL 结果替代。
 
@@ -63,7 +113,7 @@ git clone https://github.com/wxyhaha/shopping-agent.git
 cd shopping-agent
 ~~~
 
-以上命令只获取项目文件；当前没有可安装或启动的购物应用。Windows 本机恢复与业务运行仍需在实现后实测。
+当前分支包含已提交的 T020 链接任务流程；本地提交尚未推送，因此从 GitHub 克隆仍不会获得该版本。Windows 本机独立恢复仍需实测。
 
 ## 开发与伴读
 

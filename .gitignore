@@ -32,6 +32,8 @@ htmlcov/
 
 # JavaScript dependencies and generated bundles
 node_modules/
+.wxt/
+.output/
 .next/
 .vite/
 .turbo/
