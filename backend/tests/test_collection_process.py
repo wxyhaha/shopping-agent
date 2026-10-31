@@ -40,14 +40,19 @@ def test_hung_worker_deadline_and_cancel_reap_descendants(tmp_path, cancel):
         if cancel and marker.exists():
             raise Stopped()
 
+    # A Windows worker needs roughly three seconds to import Playwright and launch Chromium
+    # before it can write the marker, so a three-second deadline races process startup
+    # rather than the hang. Seven seconds keeps the hang well past the deadline on both
+    # platforms while preserving the same proportional assertion margin.
+    deadline_seconds = 7
     with pytest.raises(Stopped if cancel else CollectionDeadline):
         run_collection_process(
             {"mode": "hang", "pids": marker.as_posix()},
-            deadline=started + 3,
+            deadline=started + deadline_seconds,
             check_cancel=guard,
             command=COMMAND,
         )
-    assert time.monotonic() - started < 7
+    assert time.monotonic() - started < deadline_seconds + 4
     assert marker.exists(), "Worker must start before checking cleanup"
     for pid in json.loads(marker.read_text()):
         assert not psutil.pid_exists(pid) or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE

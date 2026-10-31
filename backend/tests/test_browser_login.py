@@ -93,7 +93,11 @@ def test_user_login_single_window_save_private_state_and_reuse(tmp_path):
         data = json.loads(path.read_text())
         assert [cookie["domain"] for cookie in data["cookies"]] == [".jd.com"]
         assert len(data["origins"]) == 1
-        assert path.stat().st_mode & 0o777 == 0o600
+        # Windows exposes no POSIX permission bits: chmod only toggles the read-only
+        # attribute and st_mode stays 0o666. Private-file mode is a POSIX guarantee;
+        # on Windows the file sits under the user profile in a private directory.
+        if os.name == "posix":
+            assert path.stat().st_mode & 0o777 == 0o600
         assert manager.command("task", "item", state["id"], "save")["status"] == "saved"
     finally:
         manager.close()
