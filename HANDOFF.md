@@ -1,6 +1,19 @@
 # 最近一次交接
 
-## 最新检查点：自主推进搜索与可靠性（2026-10-29）
+## 最新检查点：主开发迁移到 Windows（2026-10-31）
+
+- 用户决定：改为 Windows 端用 AI agent 开发；DeepTutor 伴读推迟到开发完成后再做，因此代码不再需要留在 WSL 挂载目录内。
+- 当前基线：`main` / `b86f5d1`。`e2295bd` 提交 33 项变更（替代搜索、确定性价格核算、双库备份），`b86f5d1` 修正两处 Windows 平台测试假设；两次均已推送，本地与远端一致。
+
+- 位置：Windows 主开发目录 `D:\studyPlace\shopping-agent`；WSL 保持 `/srv/deeptutor/data/user/workspace/my-project/shopping-agent` 作为只读镜像，仅执行 `git pull --ff-only`，沿用既有容器挂载，DeepTutor 不需要改 Docker 配置。
+- 数据：WSL 私有数据经 `scripts.manage_data` 双库备份并通过 verify，登录态单独打包；恢复到 Windows `.runtime\restored-data\`，两库 `quick_check` 为 ok，任务 5、商品 8、快照 20、运行 22 与迁移前一致，迁移版本 `20261028_0004`。备份包仍在 `.runtime/backups/migrate-to-windows/`（忽略目录，含私有数据）。
+- 工具链：uv 0.13.6（用户 Python 3.12）、Node 24.22.1、Playwright Chromium。nvm4w 的 npmmirror 镜像缺 24.22.1，改用官方源并按 SHA-256 校验后装入 `D:\software\nvm\v24.22.1`；未改 nvm 全局镜像。
+- 验证：Windows 后端全套 100 项通过、1 项因无可见桌面跳过；前端 typecheck、bridge 6 项、`build:web`/`build:chrome`/`build:edge` 通过；Ruff 通过。后台以恢复目录启动，readiness ready、网页 200、任务可读、采集器可用。Linux 复跑两个修正文件 7 项通过。
+- 平台差异（已作为测试修正，非产品缺陷）：Windows worker 启动 Chromium 约 2.9 秒，原 3 秒期限造成随机失败，改为 7 秒；Windows 无 POSIX 权限位，`0o600` 校验仅在 POSIX 主机执行。
+- 未做：`.env` 未复制到 Windows，需自行配置模型密钥；Windows 上 Chrome/Edge 扩展加载与真实平台采集未验收；Docker 挂载仍指向 WSL 镜像。
+- 下一动作：在 Windows 配置 `.env` 后启动一次真实研究，验证模型网关在本机可用；随后再处理淘宝/京东真实采集覆盖。文档中的环境基线已同步更新（README、AGENTS、STATUS、本文件、跨平台记录）。
+
+## 此前检查点：自主推进搜索与可靠性（2026-10-29）
 
 - 后续增量：Windows 原生隔离副本使用 Python 3.12.7 和锁文件，53 项核心检查通过；服务、静态网页、任务保存及备份恢复 CLI 通过。发现并修复 SQLite 上下文不会关闭连接导致 Windows 文件占用的问题。备份现为9项检查；研究新增确切快照/错归属检查1项。Docker现有挂载与两份代码/文档哈希核对一致。T070改为进行中，完整边界见[跨平台记录](docs/CROSS_PLATFORM.md)。
 - 最终复核：WSL完整后端101项通过（保留1条既有Starlette弃用提示），Windows上述53项通过；全部后台Ruff与16个变更Python文件格式检查通过，14份Markdown链接和变更文件UTF-8/LF检查通过，`git diff --check`通过。旧未修改的`background_collector.py`有既有格式差异，未为格式化扩大改动。Windows访问现有WSL服务readiness为ready，双库备份清单再次校验成功。

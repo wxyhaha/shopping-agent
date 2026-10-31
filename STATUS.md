@@ -27,6 +27,10 @@ T010、T020 已完成；T020 本地提交 `42e4917` 未推送。用户已确认�
 
 ## 已验证
 
+- 2026-10-31 主开发迁移到 Windows：源码经 Git 搬到 `D:\studyPlace\shopping-agent`（基线 `e2295bd`），WSL 原位置保留镜像供 DeepTutor 容器读取。私有数据经双库备份、校验后恢复到 Windows，两库 `quick_check` 通过，任务 5、商品 8、快照 20、运行 22 与迁移前一致。Windows 安装 uv 0.13.6、Node 24.22.1、Playwright Chromium；后台 readiness 为 ready、网页 200、恢复数据可读。Windows 全套 100 项通过、1 项因无可见桌面跳过；修正两处平台差异后两个平台均无回归。详见[跨平台记录](docs/CROSS_PLATFORM.md)。
+
+- 2026-10-31 迁移前基线：33 项未提交变更提交为 `e2295bd` 并推送，远端 `0e222c5..e2295bd` 同步成功；提交前 Ruff、16 个变更 Python 文件格式、14 份 Markdown 链接与 UTF-8/LF、`git diff --check` 均通过。
+
 - 最终回归：2026-10-29 WSL后端全套101项、Windows原生核心53项通过；Ruff、变更Python格式、14份Markdown链接、UTF-8/LF及`git diff --check`通过。Windows可访问当前WSL服务，readiness为ready；双库备份再次校验成功。保留1条既有Starlette弃用提示。
 
 - 2026-10-29 跨平台增量：Windows 原生 Python 3.12.7 独立副本53项核心检查、服务/静态网页/任务保存和备份恢复 CLI 通过；SQLite连接已显式关闭，修复Windows文件占用。备份9项、研究8项检查通过。DeepTutor容器实际挂载路径与代码/文档SHA-256一致；详见[跨平台记录](docs/CROSS_PLATFORM.md)。不代表Windows浏览器或本机前端构建通过。

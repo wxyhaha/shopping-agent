@@ -40,37 +40,37 @@ T020 的网页、扩展与持久化任务流程已由用户验收通过。当前
 
 ## 环境与路径
 
-- 主开发环境：WSL Ubuntu；通过 Windows 编辑文件。
-- WSL 项目目录：/srv/deeptutor/data/user/workspace/my-project/shopping-agent
-- Windows 可访问位置：//wsl.localhost/Ubuntu/srv/deeptutor/data/user/workspace/my-project/shopping-agent
-- DeepTutor 在 Docker 中使用同一套项目代码伴读；容器内挂载位置、访问权限与文件更新可见性仍需验证。
-- 后续需要支持从 GitHub 拉取到 Windows 本机，独立恢复并运行。
-- 代码共享不代表运行环境、依赖、浏览器会话或模型配置自动共享。
+2026-10-31 起主开发位置为 Windows 本机，WSL 仅作 DeepTutor 伴读的只读镜像。
 
-在 WSL 终端进入项目：
+- 主开发目录（Windows）：D:\studyPlace\shopping-agent；后台、网页、扩展构建、测试与浏览器均在此运行。
+- WSL 镜像目录：/srv/deeptutor/data/user/workspace/my-project/shopping-agent；保持在原位，供 DeepTutor 容器以现有挂载读取，不需要改 Docker 配置。
+- 两侧只用 Git 同步，不共享文件系统：在 Windows 提交并推送后，WSL 镜像执行 `git pull --ff-only`。镜像不用于日常开发，也不要直接在其上产生未提交改动。
+- 数据目录各自独立：Windows 使用本机 `platformdirs` 用户数据目录，WSL 保留原有目录。迁移时的备份与恢复步骤见 [跨平台记录](docs/CROSS_PLATFORM.md)。
+- 代码共享不代表运行环境、依赖、浏览器会话或模型配置自动共享；`.env` 与登录态需按机器单独准备。
 
-~~~bash
-cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent
+在 Windows 终端进入项目：
+
+~~~powershell
+cd D:\studyPlace\shopping-agent
 ~~~
 
-### WSL 开发启动
+## Windows 开发启动
 
-准备 Python 3.10+、uv 和 Node.js 24.22.1（见 `.nvmrc`），在 WSL 开两个终端。
+准备 Python 3.12、uv 和 Node.js 24.22.1（见 `.nvmrc`）。nvm4w 默认镜像缺 24.22.1，需按 [跨平台记录](docs/CROSS_PLATFORM.md) 用官方源安装。
 
 终端一启动后台：
 
-~~~bash
-cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/backend
-uv sync --all-groups
-uv run playwright install --with-deps chromium
-sudo apt-get install --no-install-recommends fonts-noto-cjk
-uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+~~~powershell
+cd D:\studyPlace\shopping-agent\backend
+uv sync --locked --all-groups --python 3.12
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ~~~
 
 终端二启动网页开发服务器：
 
-~~~bash
-cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/frontend
+~~~powershell
+cd D:\studyPlace\shopping-agent\frontend
 npm ci
 npm run dev
 ~~~
@@ -79,19 +79,32 @@ npm run dev
 
 修改 API 数据模型后，从后台目录重新生成共享契约，再在前端生成 TypeScript 类型：
 
-~~~bash
-cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/backend
-uv run python -m scripts.export_openapi ../contracts/openapi.json
+~~~powershell
+cd D:\studyPlace\shopping-agent\backend
+.\.venv\Scripts\python.exe -m scripts.export_openapi ..\contracts\openapi.json
 ~~~
 
-~~~bash
-cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent/frontend
+~~~powershell
+cd D:\studyPlace\shopping-agent\frontend
 npm run typegen
 npm run typecheck
 npm run build:web
 npm run build:chrome
 npm run build:edge
 ~~~
+
+### WSL 镜像同步与伴读启动
+
+镜像只做同步与伴读，不装开发依赖：
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent
+git pull --ff-only origin main
+~~~
+
+DeepTutor 容器内对应路径为 `/workspace/my-project/shopping-agent`，沿用的是宿主 `/srv/deeptutor/data/user/workspace` 的既有挂载。若希望容器就读复制代码，需要另行评审 Windows 路径的 Docker 挂载并修改 Docker 配置，当前未做。
+
+浏览器打开 `http://127.0.0.1:5173/`。Vite 会把 `/api` 和 `/health` 请求代理到后台。执行生产网页构建后，FastAPI 也会在 `http://127.0.0.1:8000/` 提供网页。
 
 Chrome 的未打包目录为 `frontend/.output/chrome-mv3`，Edge 为 `frontend/.output/edge-mv3`。在各浏览器扩展管理页打开开发者模式并选择对应目录可进行本机加载。改动扩展权限或内容脚本后需在扩展管理页重新加载扩展，并刷新已打开的商品页。扩展默认访问 `http://127.0.0.1:8000`；使用 Vite 开发页时，在扩展弹窗的“本地服务地址”中改为 `http://127.0.0.1:5173`。用户确认本轮扩展和任务管理人工验收通过。
 
@@ -101,13 +114,13 @@ SQLite 文件位于服务所在系统的 `platformdirs` 用户数据目录。需
 
 | 操作 | 命令/入口 | 验证边界 |
 | --- | --- | --- |
-| 安装依赖 | 后台 `uv sync --all-groups`；前端 `npm ci` | WSL 已执行；Windows 独立恢复未验收 |
-| 启动后台与网页 | `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`；`npm run dev` | 后台迁移、静态网页与 Windows localhost 连通已检查 |
+| 安装依赖 | 后台 `uv sync --locked --all-groups --python 3.12`；前端 `npm ci` | 2026-10-31 Windows 实机已执行并通过 |
+| 启动后台与网页 | `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`；`npm run dev` | Windows 实机 readiness、网页与恢复数据读取已核对 |
 | 构建浏览器扩展 | `npm run build:chrome`；`npm run build:edge` | Chrome、Edge 页面内添加流程已由用户确认本轮验收通过 |
-| 配置标题生成 | 设置 `SHOPPING_AGENT_LLM_BASE_URL`、`SHOPPING_AGENT_LLM_MODEL`，密钥通过私有环境变量 `SHOPPING_AGENT_LLM_API_KEY` 提供；本地可放入根目录 `.env` | 当前本机私有配置已设置；模型 ID 为 `gemini-3.8-flash-high`，已有合成标题请求成功记录 |
-| 执行应用检查 | `uv run pytest`、Ruff、`npm run typecheck` 及构建脚本 | 后端全套 101 项、扩展通道 6 项通过；Ruff、类型检查、网页及双浏览器构建通过 |
+| 配置标题生成 | 设置 `SHOPPING_AGENT_LLM_BASE_URL`、`SHOPPING_AGENT_LLM_MODEL`，密钥通过私有环境变量 `SHOPPING_AGENT_LLM_API_KEY` 提供；本地可放入根目录 `.env` | `.env` 未随迁移复制，Windows 需自行准备；模型 ID 为 `gemini-3.8-flash-high` |
+| 执行应用检查 | `uv run pytest`、Ruff、`npm run typecheck` 及构建脚本 | Windows：后端 100 项通过、1 项因无可见桌面跳过；扩展通道 6 项、Ruff、类型检查及三项目标构建通过 |
 
-依赖安装说明优先使用 WSL 终端。未来增加 Shell 脚本时，首行必须为 #!/usr/bin/env bash，并在此补充使用实际脚本文件名的 chmod +x 命令。Windows 本机恢复说明需在真实验证后补齐，不能以 WSL 结果替代。
+Windows 上若增加 Shell 脚本，仍须首行 #!/usr/bin/env bash，并在此补充使用实际脚本文件名的 chmod +x 命令；Windows 原生执行的脚本另按 PowerShell 说明。仅在 WSL 成立的验收结论不自动适用于 Windows，反之亦然。
 
 ## 文本和 Git 规则
 
