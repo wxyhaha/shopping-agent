@@ -146,7 +146,11 @@ def test_pause_restart_resume_preserves_tool_context(tmp_path, configured):
         completed = wait_run(client, task_id, {"completed"})
         assert completed["report"]["findings"][0]["evidence_refs"]
         assert any(event["kind"] == "answer" for event in completed["events"])
-        assert sum(event["kind"] == "model" for event in completed["events"]) == 3
+        assert sum(event["kind"] == "model" for event in completed["events"]) == 4
+        assert any(
+            event["data"].get("output", {}).get("status") == "review_required"
+            for event in completed["events"]
+        )
         assert client.delete(f"/api/v1/tasks/{task_id}").status_code == 204
     import sqlite3
 
@@ -252,3 +256,51 @@ def test_repeat_read_identifies_same_snapshot_and_keeps_price_limits(tmp_path, c
 def test_legacy_report_is_displayed_as_partial_instead_of_recommendation():
     legacy = report("snapshot:e001")
     assert ResearchReport.model_validate(legacy).outcome == "needs_evidence"
+
+
+def test_calculation_uses_exact_read_snapshots_and_rejects_foreign_snapshot(tmp_path):
+    from tests.test_price_comparison import item as price_item
+
+    app = application(tmp_path / "price-snapshots.sqlite3", lambda *_: None)
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/v1/tasks",
+            headers={"Idempotency-Key": str(uuid4())},
+            json={
+                "title": "合成价格快照核验",
+                "items": [
+                    {"url": "https://item.jd.com/100001.html", "source": "web"},
+                    {"url": "https://item.jd.com/100002.html", "source": "web"},
+                ],
+            },
+        ).json()
+        ids = [entry["id"] for entry in task["items"]]
+        snapshots = []
+        with app.state.session_factory() as session:
+            for item_id, amount in [(ids[0], "10"), (ids[1], "20"), (ids[0], "999")]:
+                snapshot = CaptureSnapshot(
+                    item_id=item_id,
+                    platform="jd",
+                    adapter_id="test",
+                    adapter_version="1",
+                    status="partial",
+                    captured_at=utc_now(),
+                    page_url="https://item.jd.com/100001.html",
+                    idempotency_key=str(uuid4()),
+                    request_hash="synthetic",
+                    payload=price_item(item_id, amount)["snapshot"],
+                )
+                session.add(snapshot)
+                session.flush()
+                snapshots.append(snapshot.id)
+            session.commit()
+        runtime = app.state.research_runtime
+        result = runtime._calculate_prices(
+            task["id"], ids, dict(zip(ids, snapshots[:2], strict=True))
+        )
+        assert result[0]["bases"][0]["difference_amount"] == "10"
+        assert snapshots[2] not in str(result)
+        result = runtime._calculate_prices(
+            task["id"], ids, {ids[0]: snapshots[1], ids[1]: snapshots[1]}
+        )
+        assert result[0]["status"] == "unavailable"

@@ -142,9 +142,9 @@ def test_agent_backend_tool_persists_cites_and_replays_without_extension(tmp_pat
             return tool("read_product_evidence", {"item_id": item_id})
         if len(seen) == 1:
             return tool("collect_product_page", {"item_id": item_id, "reason": "核对新规格证据"})
-        assert seen[-1]["mode"] == "headless"
-        assert seen[-1]["freshness"] == "captured_now"
-        return tool("submit_report", report(seen[-1]["evidence"][0]["ref"]))
+        captured = next(result for result in seen if result.get("mode") == "headless")
+        assert captured["freshness"] == "captured_now"
+        return tool("submit_report", report(captured["evidence"][0]["ref"]))
 
     app = application(tmp_path / "integration.sqlite3", model)
     service = collector(tmp_path)

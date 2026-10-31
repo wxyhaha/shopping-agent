@@ -351,6 +351,33 @@ button.side-empty { border: 0; background: transparent; cursor: pointer; text-al
 .research-result-summary h4, .research-result-section-heading h4 { margin: 0; color: #33483a; font-size: 15px; }
 .research-summary, .research-finding-copy { color: #34473a; white-space: pre-line; overflow-wrap: anywhere; }
 .research-summary { margin-top: 10px; font-size: 16px; line-height: 1.85; }
+.research-calculations { margin-top: 22px; }
+.research-calculation-note { margin: 0 0 12px; color: #708075; font-size: 13px; line-height: 1.65; }
+.research-calculation-list { display: grid; gap: 12px; }
+.research-calculation-card { padding: 15px; border: 1px solid #e1e9e2; border-radius: 11px; background: #fbfcfb; }
+.research-calculation-products { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.research-calculation-product { display: grid; gap: 5px; min-width: 0; }
+.research-calculation-product > span, .research-calculation-values > div > span { color: #78867c; font-size: 12px; }
+.research-calculation-product strong { color: #34473a; font-size: 14px; overflow-wrap: anywhere; }
+.research-calculation-product small, .research-calculation-values small { color: #809087; line-height: 1.5; overflow-wrap: anywhere; }
+.research-calculation-basis { margin-top: 13px; padding-top: 12px; border-top: 1px solid #e8eee8; }
+.research-calculation-basis-title { margin-bottom: 8px; color: #526b58; font-size: 13px; font-weight: 600; }
+.research-calculation-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.research-calculation-values > div { display: grid; gap: 4px; min-width: 0; }
+.research-calculation-values strong { color: #24372a; font-size: 17px; font-variant-numeric: tabular-nums; }
+.research-calculation-difference { margin: 10px 0 0; color: #617166; font-size: 13px; }
+.research-calculation-difference strong { color: #355943; font-variant-numeric: tabular-nums; }
+.research-unit-price { display: grid; gap: 8px; margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #eef5ef; color: #526b58; font-size: 13px; }
+.research-unit-price-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 7px 14px; }
+.research-unit-price-row + .research-unit-price-row { padding-top: 8px; border-top: 1px solid #dce8dd; }
+.research-unit-price-row strong { width: 100%; color: #3d5744; }
+.research-unit-price-row span { color: #33483a; font-variant-numeric: tabular-nums; }
+.research-unit-price small, .research-unit-price-unavailable { color: #7a877d; font-size: 12px; }
+.research-unit-price-unavailable { margin-top: 9px; }
+.research-calculation-unavailable { margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #fff7e6; color: #8b6325; font-size: 13px; line-height: 1.6; }
+.research-calculation-evidence { margin-top: 10px; }
+.research-calculation-evidence > summary { width: fit-content; cursor: pointer; color: #56705e; font-size: 13px; }
+.research-calculation-evidence blockquote { margin: 8px 0; padding: 9px 12px; border-left: 3px solid #9cb69f; border-radius: 0 7px 7px 0; background: #f5f8f5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .research-findings-section { margin-top: 22px; }
 .research-result-section-heading { display: flex; align-items: baseline; gap: 9px; margin-bottom: 6px; }
 .research-result-section-heading span { color: #859287; font-size: 12px; }
@@ -370,8 +397,17 @@ button.side-empty { border: 0; background: transparent; cursor: pointer; text-al
   .research-panel { padding: 16px; }
   .research-result { padding: 16px; }
   .research-result-heading { align-items: flex-start; }
+  .research-calculation-products, .research-calculation-values { grid-template-columns: 1fr; }
   .research-timeline-item { grid-template-columns: 28px minmax(0, 1fr) auto; grid-template-areas: "index main action" "index duration action"; gap: 5px 8px; }
   .research-timeline-duration { text-align: left; }
   .research-record-field { grid-template-columns: 1fr; gap: 3px; }
   .research-record-meta time { width: 100%; margin-left: 0; }
 }
+.research-search { margin-top: 24px; border-top: 1px solid #e5e7eb; padding-top: 20px; }
+.research-search-requirements, .research-search-attempt, .research-alternative {
+  margin-top: 12px; padding: 16px; border: 1px solid #e5e7eb; border-radius: 12px;
+  overflow-wrap: anywhere;
+}
+.research-search-attempt summary { cursor: pointer; }
+.research-search li + li { margin-top: 8px; }
+.research-alternative > .ant-tag { margin-left: 12px; }

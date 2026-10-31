@@ -302,6 +302,27 @@ export interface components {
             /** Browser */
             browser?: ("chrome" | "edge") | null;
         };
+        /** AlternativeAssessment */
+        AlternativeAssessment: {
+            /** Item Id */
+            item_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "qualified" | "rejected" | "needs_evidence";
+            /**
+             * Brand Relation
+             * @enum {string}
+             */
+            brand_relation: "different" | "same" | "unknown";
+            /** Brand Evidence Refs */
+            brand_evidence_refs?: string[];
+            /** Checks */
+            checks: components["schemas"]["ConditionCheck"][];
+            /** Tradeoffs */
+            tradeoffs: string;
+        };
         /** AskUserArgs */
         AskUserArgs: {
             /** Question */
@@ -407,6 +428,35 @@ export interface components {
             extension_version?: string | null;
             /** Last Seen At */
             last_seen_at?: string | null;
+        };
+        /** CalculatedPrice */
+        CalculatedPrice: {
+            /** Amount */
+            amount: string;
+            /** Currency */
+            currency: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "current" | "list" | "member" | "coupon";
+            /** Raw Text */
+            raw_text: string;
+            /** Conditions */
+            conditions?: string[];
+            /** Evidence Refs */
+            evidence_refs: string[];
+        };
+        /** CalculationProduct */
+        CalculationProduct: {
+            /** Item Id */
+            item_id: string;
+            /** Title */
+            title: string;
+            /** Selected Variant */
+            selected_variant?: string | null;
+            /** Evidence Refs */
+            evidence_refs?: string[];
         };
         /** CaptureCoverageInput */
         CaptureCoverageInput: {
@@ -569,6 +619,20 @@ export interface components {
              */
             requires_open_product_page: false;
         };
+        /** ConditionCheck */
+        ConditionCheck: {
+            /** Condition Id */
+            condition_id: string;
+            /**
+             * Result
+             * @enum {string}
+             */
+            result: "matched" | "unmatched" | "unknown";
+            /** Explanation */
+            explanation: string;
+            /** Evidence Refs */
+            evidence_refs?: string[];
+        };
         /** CreateTaskRequest */
         CreateTaskRequest: {
             /** Title */
@@ -587,6 +651,13 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** HardCondition */
+        HardCondition: {
+            /** Id */
+            id: string;
+            /** Description */
+            description: string;
         };
         /** ImageObservationInput */
         ImageObservationInput: {
@@ -641,6 +712,26 @@ export interface components {
             capture_status: string;
             /** Created At */
             created_at: string;
+        };
+        /** PriceBasisCalculation */
+        PriceBasisCalculation: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "current" | "list" | "member" | "coupon";
+            price_a: components["schemas"]["CalculatedPrice"];
+            price_b: components["schemas"]["CalculatedPrice"];
+            /** Difference Amount */
+            difference_amount: string;
+            /** Difference Percent Of Higher */
+            difference_percent_of_higher?: string | null;
+            /** Lower Price Item Id */
+            lower_price_item_id?: string | null;
+            /** Unit Prices */
+            unit_prices?: components["schemas"]["UnitPriceCalculation"][];
+            /** Unit Price Unavailable Reason */
+            unit_price_unavailable_reason?: string | null;
         };
         /** PriceConditionInput */
         PriceConditionInput: {
@@ -711,6 +802,20 @@ export interface components {
             /** Evidence Ids */
             evidence_ids?: string[];
         };
+        /** ProductPriceComparison */
+        ProductPriceComparison: {
+            product_a: components["schemas"]["CalculationProduct"];
+            product_b: components["schemas"]["CalculationProduct"];
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "calculated" | "unavailable";
+            /** Reason */
+            reason?: string | null;
+            /** Bases */
+            bases?: components["schemas"]["PriceBasisCalculation"][];
+        };
         /** ResearchEvent */
         ResearchEvent: {
             /** Id */
@@ -742,6 +847,11 @@ export interface components {
             findings: components["schemas"]["Finding"][];
             /** Unknowns */
             unknowns: string[];
+            /** Price Comparisons */
+            price_comparisons?: components["schemas"]["ProductPriceComparison"][];
+            search_requirements?: components["schemas"]["SearchRequirementsArgs"] | null;
+            /** Alternatives */
+            alternatives?: components["schemas"]["AlternativeAssessment"][];
         };
         /** ResearchRunRead */
         ResearchRunRead: {
@@ -780,6 +890,15 @@ export interface components {
             /** Answer */
             answer?: string | null;
         };
+        /** SearchRequirementsArgs */
+        SearchRequirementsArgs: {
+            /** Source Item Id */
+            source_item_id: string;
+            /** Hard Conditions */
+            hard_conditions: components["schemas"]["HardCondition"][];
+            /** Preferences */
+            preferences?: string[];
+        };
         /** StartResearchRequest */
         StartResearchRequest: {
             /** Goal */
@@ -816,6 +935,32 @@ export interface components {
             created_at: string;
             /** Updated At */
             updated_at: string;
+        };
+        /** UnitPriceCalculation */
+        UnitPriceCalculation: {
+            /**
+             * Dimension
+             * @enum {string}
+             */
+            dimension: "mass" | "volume" | "length" | "count" | "storage";
+            /** Unit */
+            unit: string;
+            /** Quantity A */
+            quantity_a: string;
+            /** Quantity B */
+            quantity_b: string;
+            /** Price A Per Unit */
+            price_a_per_unit: string;
+            /** Price B Per Unit */
+            price_b_per_unit: string;
+            /** Difference Per Unit */
+            difference_per_unit: string;
+            /** Lower Price Item Id */
+            lower_price_item_id?: string | null;
+            /** Currency */
+            currency: string;
+            /** Evidence Refs */
+            evidence_refs: string[];
         };
         /** UpdateItemTitleRequest */
         UpdateItemTitleRequest: {

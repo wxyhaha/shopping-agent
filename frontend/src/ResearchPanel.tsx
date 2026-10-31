@@ -5,6 +5,7 @@ import { cancelResearch, createIdempotencyKey, getBrowserConnections, getCollect
 import type { components } from "./api/schema";
 import { BrowserLoginPanel } from "./BrowserLoginPanel";
 import { ResearchTimeline } from "./ResearchTimeline";
+import { ResearchSearch } from "./ResearchSearch";
 
 type Run = components["schemas"]["ResearchRunRead"];
 const STATUS: Record<string, string> = {
@@ -32,6 +33,86 @@ function ReportText({ text, className }: { text: string; className?: string }) {
   return <div className={className}>{normalizeReportText(text)}</div>;
 }
 
+const PRICE_KIND_LABEL: Record<string, string> = {
+  current: "页面当前价",
+  list: "优惠前 / 划线价",
+  member: "会员价",
+  coupon: "券后价",
+};
+const MEASURE_DIMENSION_LABEL: Record<string, string> = {
+  mass: "重量",
+  volume: "容量",
+  length: "长度",
+  count: "数量",
+  storage: "存储容量",
+};
+
+function formatCurrency(value: string, currency: string): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return `${value} ${currency}`;
+  try {
+    return new Intl.NumberFormat("zh-CN", {
+      style: "currency", currency, maximumFractionDigits: 6,
+    }).format(numeric);
+  } catch {
+    return `${value} ${currency}`;
+  }
+}
+
+function PriceCalculations({ run, refs }: { run: Run; refs: Map<string, string> }) {
+  const comparisons = run.report?.price_comparisons ?? [];
+  if (!comparisons.length) return null;
+  return <section className="research-calculations" aria-label="程序核算的价格比较">
+    <div className="research-result-section-heading">
+      <h4>价格核算</h4><span>按本次研究读取的快照计算</span>
+    </div>
+    <p className="research-calculation-note">只比较已核验选中规格下同币种、同类型且优惠条件一致的页面价格。规格中存在可核实的重量、容量、长度、数量或存储容量时，会按双方相同的计量维度折算单位价；不同维度不换算。计算差额不代表最终支付价，也不证明商品属于同款。</p>
+    <div className="research-calculation-list">
+      {comparisons.map((comparison) => <article className="research-calculation-card" key={`${comparison.product_a.item_id}:${comparison.product_b.item_id}`}>
+        <div className="research-calculation-products">
+          {[comparison.product_a, comparison.product_b].map((product, productIndex) => <div className="research-calculation-product" key={product.item_id}>
+            <span>商品 {productIndex + 1}</span>
+            <strong>{product.title}</strong>
+            {product.selected_variant && <small>页面选中规格：{product.selected_variant}</small>}
+          </div>)}
+        </div>
+        {comparison.status === "unavailable" ? <div className="research-calculation-unavailable">暂无法核算：{comparison.reason}</div>
+          : (comparison.bases ?? []).map((basis, basisIndex) => {
+            const evidenceRefs = [...new Set([
+              ...(comparison.product_a.evidence_refs ?? []),
+              ...(comparison.product_b.evidence_refs ?? []),
+              ...basis.price_a.evidence_refs,
+              ...basis.price_b.evidence_refs,
+              ...(basis.unit_prices ?? []).flatMap((unitPrice) => unitPrice.evidence_refs),
+            ])];
+            return <div className="research-calculation-basis" key={`${basis.kind}:${basisIndex}`}>
+              <div className="research-calculation-basis-title">{PRICE_KIND_LABEL[basis.kind] ?? basis.kind}</div>
+              <div className="research-calculation-values">
+                <div><span>{comparison.product_a.title}</span><strong>{formatCurrency(basis.price_a.amount, basis.price_a.currency)}</strong><small>{basis.price_a.raw_text}</small></div>
+                <div><span>{comparison.product_b.title}</span><strong>{formatCurrency(basis.price_b.amount, basis.price_b.currency)}</strong><small>{basis.price_b.raw_text}</small></div>
+              </div>
+              <p className="research-calculation-difference">页面标价相差 <strong>{formatCurrency(basis.difference_amount, basis.price_a.currency)}</strong>
+                {basis.difference_percent_of_higher !== null && <> · 较低一方比高价低 <strong>{basis.difference_percent_of_higher}%</strong></>}
+              </p>
+              {(basis.unit_prices ?? []).length > 0 ? <div className="research-unit-price">
+                {(basis.unit_prices ?? []).map((unitPrice, unitIndex) => <div className="research-unit-price-row" key={`${unitPrice.dimension}:${unitPrice.unit}:${unitIndex}`}>
+                  <strong>{MEASURE_DIMENSION_LABEL[unitPrice.dimension] ?? "计量规格"}折算单价</strong>
+                  <small>规格量：{unitPrice.quantity_a} {unitPrice.unit} / {unitPrice.quantity_b} {unitPrice.unit}</small>
+                  <span>{formatCurrency(unitPrice.price_a_per_unit, unitPrice.currency)} / {unitPrice.unit}</span>
+                  <span>{formatCurrency(unitPrice.price_b_per_unit, unitPrice.currency)} / {unitPrice.unit}</span>
+                  <small>单位价相差 {formatCurrency(unitPrice.difference_per_unit, unitPrice.currency)}</small>
+                </div>)}
+              </div> : basis.unit_price_unavailable_reason && <div className="research-unit-price-unavailable">{basis.unit_price_unavailable_reason}</div>}
+              <details className="research-calculation-evidence"><summary>查看计算依据 · {evidenceRefs.length} 条</summary>
+                {evidenceRefs.map((ref) => <blockquote key={ref}>{normalizeReportText(refs.get(ref) || "对应证据见研究运行记录。")}</blockquote>)}
+              </details>
+            </div>;
+          })}
+      </article>)}
+    </div>
+  </section>;
+}
+
 function RunResult({ run }: { run: Run }) {
   const refs = evidenceLookup(run);
   if (!run.report) return null;
@@ -46,6 +127,7 @@ function RunResult({ run }: { run: Run }) {
       <h4>结论</h4>
       <ReportText className="research-summary" text={run.report.summary} />
     </div>
+    <PriceCalculations run={run} refs={refs} />
     {run.report.findings.length > 0 && <div className="research-findings-section">
       <div className="research-result-section-heading"><h4>关键发现与依据</h4><span>{run.report.findings.length} 条</span></div>
       <div className="research-findings">
@@ -98,12 +180,13 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
     return event.kind === "tool" && ["capture_product_page", "collect_product_page", "inspect_product_variants", "select_product_variant"].includes(String(event.data.tool)) &&
       Boolean((output as { snapshot_id?: string })?.snapshot_id);
   }).map((event) => (event.data.output as { snapshot_id: string }).snapshot_id)).join(",");
+  const adoptedCandidates = runs.flatMap((item) => item.events.filter((event) => event.kind === "candidate").map((event) => event.id)).join(",");
   useEffect(() => {
-    if (!capturedSnapshots) return;
+    if (!capturedSnapshots && !adoptedCandidates) return;
     void queryClient.invalidateQueries({ queryKey: ["task", taskId] });
     void queryClient.invalidateQueries({ queryKey: ["captures", taskId] });
     void queryClient.invalidateQueries({ queryKey: ["tasks"] });
-  }, [capturedSnapshots, queryClient, taskId]);
+  }, [capturedSnapshots, adoptedCandidates, queryClient, taskId]);
   const hasActive = runs.some((item) => ["queued", "running", "needs_input", "interrupted"].includes(item.status));
   const error = start.error || resume.error || cancel.error || runsQuery.error;
   const blockedItemIds = [...new Set((run?.events ?? []).filter((event) => {
@@ -127,7 +210,7 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
       <Input.TextArea id="research-goal" value={goal} onChange={(event) => setGoal(event.target.value)}
         placeholder="例如：这两款网线哪款适合家用？请先核对长度、材质和所选规格，信息不足时向我确认。"
         autoSize={{ minRows: 3, maxRows: 7 }} maxLength={4000} disabled={hasActive} />
-      <div className="research-start-row"><small>开始后，需求及商品文字证据会发送到你配置的 AI 网关。助手会按需在后台打开链接、读取并选择可核对的规格，等待页面价格更新。遇到登录、验证或规格歧义时会请你接管；图片阅读和替代品搜索尚未接入。</small>
+      <div className="research-start-row"><small>开始后，需求及商品文字证据会发送到你配置的 AI 网关。助手会按需打开商品链接、核验规格和价格；要求寻找替代品时，会搜索淘宝或京东并将候选加入任务逐项核实。遇到登录、验证或规格歧义时会请你接管；图片内容阅读尚未接入。</small>
         <Button type="primary" htmlType="submit" loading={start.isPending} disabled={hasActive || goal.trim().length < 2 || runsQuery.isLoading || runsQuery.isError}>开始研究</Button>
       </div>
     </form>
@@ -169,6 +252,7 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
       {!run.question && ["failed", "interrupted"].includes(run.status) && <Button onClick={() => resume.mutate({ id: run.id })} loading={resume.isPending}>从检查点继续</Button>}
       {run.events.length > 0 && <ResearchTimeline run={run} />}
       <RunResult run={run} />
+      <ResearchSearch run={run} />
     </div>}
   </section>;
 }

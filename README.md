@@ -16,7 +16,9 @@ T020 的网页、扩展与持久化任务流程已由用户验收通过。当前
 
 ## 当前已交付能力
 
-- 任务详情中的“购物研究助手”接受用途、硬条件和问题；模型选择工具读取最新快照、向用户确认并继续，最终显示带来源引用和未知项的报告。运行与 LangGraph 检查点持久化，支持停止、失败后继续及历史结果。研究会向配置的网关发送需求和读取的文字证据；图片内容与自主网页搜索尚未接入。
+- 任务详情中的“购物研究助手”接受用途、硬条件和问题；模型选择工具读取最新快照、向用户确认并继续，最终显示带来源引用和未知项的报告。运行与 LangGraph 检查点持久化，支持停止、失败后继续及历史结果。研究会向配置的网关发送需求和读取的文字证据；图片内容阅读尚未接入。
+- 替代搜索已接入：提取硬条件与偏好，在淘宝/京东搜索候选，加入任务后读取详情，逐项记录满足、不满足或待核实。仅有搜索标题不能生成合格推荐；真实平台目前仍有风控与结果未识别限制。实现、16 项检查及真实模型合成联调见 [替代搜索](docs/ALTERNATIVE_SEARCH.md)。
+- 价格由后端按证据确定性核算，支持同维度单位价；28 项价格边界用例已通过。私有业务数据库与检查点可成对备份、校验并恢复到新目录，见 [数据恢复](docs/DATA_RECOVERY.md)。
 
 - Agent 可按需调用后台独立 Chromium 打开任务商品链接并滚动采集，无需打开商品页或更新扩展。访问受阻时记录登录/验证原因并请求接管；使用独立的私有会话。安装、人工登录入口和实际验证边界见 [后台采集说明](docs/BACKGROUND_COLLECTION.md)。
 - 自动规格核验已接入：模型读取可选目录、按 ID 请求受控选择，程序核对选中状态及稳定后的同页价格，再返回有证据的新快照。工作台可查看可选目录和核验状态；实际天猫样本已读出 2 组 26 个选项并核验目标长度。完整边界与学习记录见 [自动规格核验](docs/AUTOMATIC_VARIANTS.md)。
@@ -103,11 +105,13 @@ SQLite 文件位于服务所在系统的 `platformdirs` 用户数据目录。需
 | 启动后台与网页 | `uv run uvicorn app.main:app --host 127.0.0.1 --port 8000`；`npm run dev` | 后台迁移、静态网页与 Windows localhost 连通已检查 |
 | 构建浏览器扩展 | `npm run build:chrome`；`npm run build:edge` | Chrome、Edge 页面内添加流程已由用户确认本轮验收通过 |
 | 配置标题生成 | 设置 `SHOPPING_AGENT_LLM_BASE_URL`、`SHOPPING_AGENT_LLM_MODEL`，密钥通过私有环境变量 `SHOPPING_AGENT_LLM_API_KEY` 提供；本地可放入根目录 `.env` | 当前本机私有配置已设置；模型 ID 为 `gemini-3.8-flash-high`，已有合成标题请求成功记录 |
-| 执行应用检查 | `uv run pytest`、Ruff、`npm run typecheck` 及构建脚本 | API 8 项检查、Ruff、类型检查、网页及双浏览器构建已通过 |
+| 执行应用检查 | `uv run pytest`、Ruff、`npm run typecheck` 及构建脚本 | 后端全套 101 项、扩展通道 6 项通过；Ruff、类型检查、网页及双浏览器构建通过 |
 
 依赖安装说明优先使用 WSL 终端。未来增加 Shell 脚本时，首行必须为 #!/usr/bin/env bash，并在此补充使用实际脚本文件名的 chmod +x 命令。Windows 本机恢复说明需在真实验证后补齐，不能以 WSL 结果替代。
 
 ## 文本和 Git 规则
+
+2026-10-29 Windows 原生隔离副本已完成 53 项后台核心检查，以及服务启动、任务保存和备份恢复；DeepTutor 容器可见同版本代码。实际范围、PowerShell 恢复步骤与未验收边界见 [跨平台记录](docs/CROSS_PLATFORM.md)。Windows 浏览器与前端本机构建仍需单独验收。
 
 - 新建与编辑的文件统一 UTF-8、LF；编辑器规则见 [.editorconfig](.editorconfig)。
 - Git 规则见 [.gitattributes](.gitattributes)：默认文本 LF，Shell 文件 LF，批处理文件在 Git 检出时使用 CRLF。这是 Git 检出策略；本次新建文件均为 LF。

@@ -1281,6 +1281,67 @@
         ],
         "title": "AddItemRequest"
       },
+      "AlternativeAssessment": {
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "maxLength": 36,
+            "minLength": 1,
+            "title": "Item Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "qualified",
+              "rejected",
+              "needs_evidence"
+            ],
+            "title": "Status"
+          },
+          "brand_relation": {
+            "type": "string",
+            "enum": [
+              "different",
+              "same",
+              "unknown"
+            ],
+            "title": "Brand Relation"
+          },
+          "brand_evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Brand Evidence Refs"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/ConditionCheck"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Checks"
+          },
+          "tradeoffs": {
+            "type": "string",
+            "maxLength": 1200,
+            "minLength": 1,
+            "title": "Tradeoffs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "item_id",
+          "status",
+          "brand_relation",
+          "checks",
+          "tradeoffs"
+        ],
+        "title": "AlternativeAssessment"
+      },
       "AskUserArgs": {
         "properties": {
           "question": {
@@ -1612,6 +1673,106 @@
           "connected"
         ],
         "title": "BrowserPageConnection"
+      },
+      "CalculatedPrice": {
+        "properties": {
+          "amount": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Amount"
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "title": "Currency"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "current",
+              "list",
+              "member",
+              "coupon"
+            ],
+            "title": "Kind"
+          },
+          "raw_text": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Raw Text"
+          },
+          "conditions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Conditions"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 40,
+            "minItems": 1,
+            "title": "Evidence Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "amount",
+          "currency",
+          "kind",
+          "raw_text",
+          "evidence_refs"
+        ],
+        "title": "CalculatedPrice"
+      },
+      "CalculationProduct": {
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "maxLength": 36,
+            "minLength": 1,
+            "title": "Item Id"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Title"
+          },
+          "selected_variant": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected Variant"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Evidence Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "item_id",
+          "title"
+        ],
+        "title": "CalculationProduct"
       },
       "CaptureCoverageInput": {
         "properties": {
@@ -2131,6 +2292,47 @@
         ],
         "title": "CollectionAvailability"
       },
+      "ConditionCheck": {
+        "properties": {
+          "condition_id": {
+            "type": "string",
+            "maxLength": 3,
+            "pattern": "^c[1-9][0-9]?$",
+            "title": "Condition Id"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "matched",
+              "unmatched",
+              "unknown"
+            ],
+            "title": "Result"
+          },
+          "explanation": {
+            "type": "string",
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Explanation"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "title": "Evidence Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "condition_id",
+          "result",
+          "explanation"
+        ],
+        "title": "ConditionCheck"
+      },
       "CreateTaskRequest": {
         "properties": {
           "title": {
@@ -2201,6 +2403,29 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "HardCondition": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 3,
+            "pattern": "^c[1-9][0-9]?$",
+            "title": "Id"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 400,
+            "minLength": 2,
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "description"
+        ],
+        "title": "HardCondition"
       },
       "ImageObservationInput": {
         "properties": {
@@ -2407,6 +2632,84 @@
           "created_at"
         ],
         "title": "ItemRead"
+      },
+      "PriceBasisCalculation": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "current",
+              "list",
+              "member",
+              "coupon"
+            ],
+            "title": "Kind"
+          },
+          "price_a": {
+            "$ref": "#/components/schemas/CalculatedPrice"
+          },
+          "price_b": {
+            "$ref": "#/components/schemas/CalculatedPrice"
+          },
+          "difference_amount": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Difference Amount"
+          },
+          "difference_percent_of_higher": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^\\d+(?:\\.\\d+)?$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Difference Percent Of Higher"
+          },
+          "lower_price_item_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lower Price Item Id"
+          },
+          "unit_prices": {
+            "items": {
+              "$ref": "#/components/schemas/UnitPriceCalculation"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Unit Prices"
+          },
+          "unit_price_unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price Unavailable Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "price_a",
+          "price_b",
+          "difference_amount"
+        ],
+        "title": "PriceBasisCalculation"
       },
       "PriceConditionInput": {
         "properties": {
@@ -2672,6 +2975,52 @@
         ],
         "title": "PriceObservationInput"
       },
+      "ProductPriceComparison": {
+        "properties": {
+          "product_a": {
+            "$ref": "#/components/schemas/CalculationProduct"
+          },
+          "product_b": {
+            "$ref": "#/components/schemas/CalculationProduct"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "calculated",
+              "unavailable"
+            ],
+            "title": "Status"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "bases": {
+            "items": {
+              "$ref": "#/components/schemas/PriceBasisCalculation"
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Bases"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "product_a",
+          "product_b",
+          "status"
+        ],
+        "title": "ProductPriceComparison"
+      },
       "ResearchEvent": {
         "properties": {
           "id": {
@@ -2750,6 +3099,32 @@
             "type": "array",
             "maxItems": 30,
             "title": "Unknowns"
+          },
+          "price_comparisons": {
+            "items": {
+              "$ref": "#/components/schemas/ProductPriceComparison"
+            },
+            "type": "array",
+            "maxItems": 190,
+            "title": "Price Comparisons"
+          },
+          "search_requirements": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SearchRequirementsArgs"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/AlternativeAssessment"
+            },
+            "type": "array",
+            "maxItems": 3,
+            "title": "Alternatives"
           }
         },
         "additionalProperties": false,
@@ -2877,6 +3252,40 @@
         "type": "object",
         "title": "ResumeResearchRequest"
       },
+      "SearchRequirementsArgs": {
+        "properties": {
+          "source_item_id": {
+            "type": "string",
+            "maxLength": 36,
+            "minLength": 1,
+            "title": "Source Item Id"
+          },
+          "hard_conditions": {
+            "items": {
+              "$ref": "#/components/schemas/HardCondition"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Hard Conditions"
+          },
+          "preferences": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 10,
+            "title": "Preferences"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_item_id",
+          "hard_conditions"
+        ],
+        "title": "SearchRequirementsArgs"
+      },
       "StartResearchRequest": {
         "properties": {
           "goal": {
@@ -2976,6 +3385,92 @@
           "updated_at"
         ],
         "title": "TaskSummary"
+      },
+      "UnitPriceCalculation": {
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "mass",
+              "volume",
+              "length",
+              "count",
+              "storage"
+            ],
+            "title": "Dimension"
+          },
+          "unit": {
+            "type": "string",
+            "maxLength": 12,
+            "minLength": 1,
+            "title": "Unit"
+          },
+          "quantity_a": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Quantity A"
+          },
+          "quantity_b": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Quantity B"
+          },
+          "price_a_per_unit": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Price A Per Unit"
+          },
+          "price_b_per_unit": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Price B Per Unit"
+          },
+          "difference_per_unit": {
+            "type": "string",
+            "pattern": "^\\d+(?:\\.\\d+)?$",
+            "title": "Difference Per Unit"
+          },
+          "lower_price_item_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lower Price Item Id"
+          },
+          "currency": {
+            "type": "string",
+            "pattern": "^[A-Z]{3}$",
+            "title": "Currency"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 40,
+            "minItems": 2,
+            "title": "Evidence Refs"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "dimension",
+          "unit",
+          "quantity_a",
+          "quantity_b",
+          "price_a_per_unit",
+          "price_b_per_unit",
+          "difference_per_unit",
+          "currency",
+          "evidence_refs"
+        ],
+        "title": "UnitPriceCalculation"
       },
       "UpdateItemTitleRequest": {
         "properties": {

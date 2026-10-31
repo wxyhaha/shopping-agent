@@ -123,10 +123,14 @@ def test_agent_chooses_catalog_ids_and_report_cites_selected_snapshot(tmp_path, 
                     "reason": "选择用户目标规格",
                 },
             )
-        assert seen[-1]["variant_verification"]["status"] == "selected"
+        selected = next(
+            result
+            for result in seen
+            if (result.get("variant_verification") or {}).get("status") == "selected"
+        )
         ref = next(
             e["ref"]
-            for e in seen[-1]["evidence"]
+            for e in selected["evidence"]
             if "10米" in (e.get("excerpt") or "") and "已选中" in e["excerpt"]
         )
         return tool(

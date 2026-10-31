@@ -25,12 +25,17 @@ from app.agent_schemas import (
     ReadEvidenceArgs,
     ResearchReport,
     SelectProductVariantArgs,
+    SubmitResearchReport,
 )
 from app.background_collector import BackgroundCollector
 from app.browser_capture import TERMINAL, aware, cancel_capture_jobs, create_capture_job
 from app.config import get_settings
 from app.models import AgentRun, BrowserCaptureJob, CaptureSnapshot, ProductItem, Task, utc_now
+from app.price_comparison import calculate_price_comparisons
+from app.product_search import ProductSearch
 from app.routes import persist_capture_snapshot
+from app.search_runtime import SearchRuntimeMixin, validate_alternatives
+from app.search_schemas import AdoptSearchCandidateArgs, SearchProductsArgs, SearchRequirementsArgs
 from app.title_generation import _chat_completions_url
 
 MAX_TURNS = 24
@@ -61,6 +66,7 @@ SYSTEM_PROMPT = """你是购物研究 Agent，围绕用户用途和硬条件研�
 选择后必须核对 variant_verification：selected 才表示点击结果已观察确认；
 其他状态需要补查或明确说明失败。
 每研究最多三次采集/目录读取和三次选择核验。相同目录不可无限重试。
+加入搜索候选后，两类上限各扩展到六次，仍需在模型总调用与执行片段时限内完成。
 price_binding=same_page_state 只表示规格选中后同页价格在等待期间稳定，
 仍须保留优惠前/会员/券后等原文语义，
 不等于已确认 SKU 专属价格或最终支付价。price_binding=unknown 时不能声称价格适用于所选规格。
@@ -69,14 +75,29 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 如果用户回答是在请求补采集，不要把该请求当作规格或价格已确认。重复读取同一 snapshot_id
 不是重新访问网页，也没有获取新证据；freshness 返回 same_snapshot 时应明确仍是原有资料。
 当前工具能读取已保存快照、后台打开任务内商品页采集、请求扩展补采集和向用户确认；
-可以受控选择已读取的规格选项；不能搜索替代商品或读取图片内容。
+可以受控选择已读取的规格选项、搜索替代商品；不能读取图片内容。
+用户要求替代商品时，先用 set_search_requirements 登记原商品、硬条件和偏好；
+硬条件来自用户需求和已读取证据，不得擅自增加限制。需求足够明确时直接搜索，不反复请求确认。
+有歧义或用户要求修改条件时使用 ask_user，回答后更新登记条件。
+使用 search_products 搜索淘宝或京东，每次最多返回第一页五条直接商品链接，每研究最多四次搜索。
+搜索标题只作线索，不是详情事实。选择候选 ID 调用 adopt_search_candidate 加入任务，最多三个候选；
+随后调用 collect_product_page/规格工具核实详情。搜索失败或登录受阻不等于没有候选；
+可以换平台或查询，达到边界则说明检索范围和未知项。不得声称全网最低或遍历整个平台。
+每个已加入候选都必须在报告 alternatives 中逐项核对登记的硬条件，包含失败和资料不足的候选。
+只有不同品牌且所有硬条件均有详情证据满足才可标为 qualified；
+明确不满足为 rejected，其他为 needs_evidence。
+品牌关系必须引用双方 product.brand 字段，品牌别名或关系不明时保留 unknown。
+搜索候选全部不合格或待核实时，针对替代搜索的报告 outcome 使用 needs_evidence，解释具体差异。
+价格计算只能证明价格维度，不能替代品牌、用途与硬条件核验。
 不要声称执行了未提供的操作，也不要由图片 URL 推断参数。
 后台返回 blocked/failed 表示访问受阻或失败，不是商品规格证据；不要仅凭标题给出确定推荐。
 每次只调用一个工具。每条 finding 必须引用工具实际返回的完整 evidence ref，
 不能把页面 SKU 编号当作已确认的规格。完成后调用 submit_report，给出有依据的取舍与未知项。
 报告要让用户可以据此做选择，而不是重复商品标题。summary 使用 2–4 个短段落，先直接回答，
 再明确本次比较的已选规格和适用范围。有同规格、同价格口径证据时，给出页面价格差额；
-只有两边价格和同一长度都已核实时，才计算每米页面标价。
+只有双方存在相同且已核验的计量维度时，才比较该维度的单位价；不得跨重量、容量、长度等维度换算。
+不要自行计算价格差额、百分比或单位价。首次提交报告时，程序会返回按原始采集证据计算的结构化结果；
+必须以该结果为准修订文字，证据不足或口径不一致时明确保留未知。
 区分共同规格与具体选项差异；颜色、型号、材质或其他已选项不同，
 不能称为“完全一致”“完全相同”或“同款”，只能限定为已对齐的共同维度。
 SKU/标题中出现的材质或性能词属于页面选项文案，除非有独立证据，不得当作已验证性能。
@@ -106,6 +127,21 @@ def tool_schema(name: str, description: str, model) -> dict:
 
 TOOLS = [
     tool_schema(
+        "set_search_requirements",
+        "登记替代搜索原商品、用户硬条件与偏好；条件可在用户补充后更新。",
+        SearchRequirementsArgs,
+    ),
+    tool_schema(
+        "search_products",
+        "后台搜索淘宝或京东第一页，返回有来源的候选 ID；搜索标题不能证明详情。",
+        SearchProductsArgs,
+    ),
+    tool_schema(
+        "adopt_search_candidate",
+        "仅将本研究实际搜索到的候选 ID 加入任务，再使用商品工具核实详情。",
+        AdoptSearchCandidateArgs,
+    ),
+    tool_schema(
         "inspect_product_variants",
         "后台打开商品页，读取可选规格分组、选项 ID、选中/禁用状态及证据，返回目录快照 ID。",
         CaptureProductPageArgs,
@@ -131,7 +167,11 @@ TOOLS = [
         CaptureProductPageArgs,
     ),
     tool_schema("ask_user", "向用户确认影响判断的关键条件，持久化暂停并等待回答。", AskUserArgs),
-    tool_schema("submit_report", "提交带有效证据引用的研究结论和仍未知的事项。", ResearchReport),
+    tool_schema(
+        "submit_report",
+        "提交带有效证据引用的研究结论和仍未知的事项；金额差额由程序另行核算。",
+        SubmitResearchReport,
+    ),
 ]
 
 
@@ -144,8 +184,12 @@ class AgentState(TypedDict):
     seen_evidence: dict
     read_items: list[str]
     read_snapshots: dict[str, str]
+    calculation_reviewed: bool
+    price_comparisons: list[dict]
     item_ids: list[str]
     report: dict | None
+    search_requirements: dict | None
+    candidate_ids: list[str]
 
 
 class AgentStopped(Exception):
@@ -223,7 +267,7 @@ def call_model(messages: list[dict], model: str) -> tuple[dict, dict]:
         raise AgentFailure("模型返回格式不符合工具调用协议，研究已停止。") from None
 
 
-class ResearchRuntime:
+class ResearchRuntime(SearchRuntimeMixin):
     def __init__(
         self, session_factory, checkpoint_path: Path | None, model_call=call_model, collector=None
     ):
@@ -231,6 +275,7 @@ class ResearchRuntime:
         self.checkpoint_path = checkpoint_path
         self.model_call = model_call
         self.collector = collector or BackgroundCollector(get_settings())
+        self.searcher = ProductSearch(get_settings())
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="shopping-research")
         self.lock = threading.Lock()
         self.active: set[str] = set()
@@ -332,6 +377,8 @@ class ResearchRuntime:
                     "item_id": item_id,
                     "excerpt": entry.get("excerpt"),
                     "source": entry.get("source"),
+                    "field_path": entry.get("field_path"),
+                    "capture_status": snapshot.status,
                 }
                 for entry in evidence
             }
@@ -354,6 +401,42 @@ class ResearchRuntime:
                 "evidence": evidence,
                 "image_note": "图片内容未读取；图片来源和尺寸不能证明图片中的规格。",
             }, refs
+
+    def _calculate_prices(
+        self, task_id: str, item_ids: list[str], read_snapshots: dict[str, str]
+    ) -> list[dict]:
+        with self.sessions() as session:
+            items = session.scalars(
+                select(ProductItem)
+                .where(ProductItem.task_id == task_id, ProductItem.id.in_(item_ids))
+                .order_by(ProductItem.created_at, ProductItem.id)
+            ).all()
+            snapshot_ids = {read_snapshots[item.id] for item in items if item.id in read_snapshots}
+            snapshots = (
+                {
+                    snapshot.id: snapshot
+                    for snapshot in session.scalars(
+                        select(CaptureSnapshot).where(CaptureSnapshot.id.in_(snapshot_ids))
+                    ).all()
+                }
+                if snapshot_ids
+                else {}
+            )
+            calculation_items = []
+            for item in items:
+                snapshot_id = read_snapshots.get(item.id)
+                snapshot = snapshots.get(snapshot_id) if snapshot_id else None
+                if snapshot and snapshot.item_id != item.id:
+                    snapshot = None
+                calculation_items.append(
+                    {
+                        "item_id": item.id,
+                        "title": item.page_title or "未命名商品",
+                        "snapshot_id": snapshot.id if snapshot else None,
+                        "snapshot": snapshot.payload if snapshot else {},
+                    }
+                )
+        return calculate_price_comparisons(calculation_items)
 
     def _collect_page(
         self, run_id, task_id, call_id, payload, deadline, tool_name="collect_product_page"
@@ -430,8 +513,12 @@ class ResearchRuntime:
         if not snapshot_id:
             if previous and previous["data"].get("output", {}).get("status") != "opening":
                 return previous["data"]["output"], {}
-            if not previous and len(limited_attempts) >= 3:
-                return {"status": "unavailable", "error": "本研究已达三次后台采集上限。"}, {}
+            limit = 6 if any(event["kind"] == "candidate" for event in run.events) else 3
+            if not previous and len(limited_attempts) >= limit:
+                return {
+                    "status": "unavailable",
+                    "error": f"本研究已达 {limit} 次后台采集上限。",
+                }, {}
             self._emit(
                 run_id,
                 event_id,
@@ -657,17 +744,54 @@ class ResearchRuntime:
             refs = dict(state["seen_evidence"])
             read_items = list(state["read_items"])
             read_snapshots = dict(state.get("read_snapshots", {}))
+            calculation_reviewed = bool(state.get("calculation_reviewed", False))
+            price_comparisons = list(state.get("price_comparisons", []))
+            requirements = state.get("search_requirements")
+            candidate_ids = list(state.get("candidate_ids", []))
+            all_item_ids = list(dict.fromkeys([*state["item_ids"], *candidate_ids]))
             action = "model"
             report = state.get("report")
             args: Any = {}
             try:
                 args = json.loads(call["function"]["arguments"])
-                if name == "read_product_evidence":
+                if name == "set_search_requirements":
+                    payload = SearchRequirementsArgs.model_validate(args)
+                    if payload.source_item_id not in state["item_ids"]:
+                        result = {"error": "替代搜索的原商品必须来自本研究开始时的任务商品。"}
+                    elif payload.source_item_id not in read_items:
+                        result = {"error": "请先读取原商品证据再提取搜索条件。"}
+                    else:
+                        requirements = payload.model_dump()
+                        result = {"status": "recorded", "requirements": requirements}
+                elif name == "search_products":
+                    payload = SearchProductsArgs.model_validate(args)
+                    result = (
+                        self._search_products(run_id, call["id"], payload, deadline)
+                        if requirements
+                        else {"error": "请先登记搜索硬条件与偏好。"}
+                    )
+                elif name == "adopt_search_candidate":
+                    payload = AdoptSearchCandidateArgs.model_validate(args)
+                    result = (
+                        self._adopt_search_candidate(
+                            run_id, task_id, call["id"], payload, deadline, state["item_ids"]
+                        )
+                        if requirements
+                        else {"error": "请先登记搜索硬条件与偏好。"}
+                    )
+                    if result.get("item_id") and result["item_id"] not in candidate_ids:
+                        candidate_ids.append(result["item_id"])
+                        calculation_reviewed = False
+                        price_comparisons = []
+                elif name == "read_product_evidence":
                     payload = ReadEvidenceArgs.model_validate(args)
                     result, new_refs = self._read_evidence(task_id, payload.item_id)
                     snapshot_id = result.get("snapshot_id")
                     if snapshot_id:
                         repeated = read_snapshots.get(payload.item_id) == snapshot_id
+                        if not repeated:
+                            calculation_reviewed = False
+                            price_comparisons = []
                         result["freshness"] = "same_snapshot" if repeated else "new_to_this_run"
                         result["retrieval_note"] = (
                             "仍是上次读取的同一份快照；没有重新访问商品页或新增证据。"
@@ -704,6 +828,9 @@ class ResearchRuntime:
                         )
                     refs.update(new_refs)
                     if result.get("snapshot_id") and new_refs:
+                        if read_snapshots.get(payload.item_id) != result["snapshot_id"]:
+                            calculation_reviewed = False
+                            price_comparisons = []
                         read_snapshots[payload.item_id] = result["snapshot_id"]
                         if payload.item_id not in read_items:
                             read_items.append(payload.item_id)
@@ -727,14 +854,52 @@ class ResearchRuntime:
                         )
                         return {"next_action": "human"}
                 elif name == "submit_report":
-                    payload = ResearchReport.model_validate(args)
+                    payload = SubmitResearchReport.model_validate(args)
                     cited = {ref for finding in payload.findings for ref in finding.evidence_refs}
-                    if set(state["item_ids"]) - set(read_items):
+                    alternative_error = validate_alternatives(
+                        payload.alternatives, requirements, candidate_ids, refs, read_snapshots
+                    )
+                    if set(all_item_ids) - set(read_items):
                         result = {"error": "请先读取任务中每件商品的证据，再提交结果。"}
                     elif not cited.issubset(refs):
                         result = {"error": "报告包含未读取或不存在的证据引用，请修正引用。"}
+                    elif alternative_error:
+                        result = {"error": alternative_error}
+                    elif (
+                        requirements
+                        and payload.outcome == "recommendation"
+                        and not any(entry.status == "qualified" for entry in payload.alternatives)
+                    ):
+                        result = {
+                            "error": "尚无已核实合格的替代候选，"
+                            "请提交 needs_evidence 并说明检索范围与限制。"
+                        }
+                    elif not calculation_reviewed:
+                        price_comparisons = self._calculate_prices(
+                            task_id, all_item_ids, read_snapshots
+                        )
+                        calculation_reviewed = True
+                        result = {
+                            "status": "review_required",
+                            "price_comparisons": price_comparisons,
+                            "instruction": (
+                                "请将这些程序核算结果作为价格数字的唯一来源。"
+                                "修订 summary/findings，删除与程序核算不符的数字；"
+                                "没有核算依据的差额、百分比和单位价格不要写入；"
+                                "若结果显示不可核算，请保留未知，然后再次调用 submit_report。"
+                            ),
+                        }
                     else:
-                        report = payload.model_dump()
+                        price_comparisons = self._calculate_prices(
+                            task_id, all_item_ids, read_snapshots
+                        )
+                        report = ResearchReport.model_validate(
+                            {
+                                **payload.model_dump(),
+                                "price_comparisons": price_comparisons,
+                                "search_requirements": requirements,
+                            }
+                        ).model_dump(mode="json")
                         result = {"status": "accepted"}
                         action = "end"
                 else:
@@ -758,6 +923,10 @@ class ResearchRuntime:
                 "seen_evidence": refs,
                 "read_items": read_items,
                 "read_snapshots": read_snapshots,
+                "calculation_reviewed": calculation_reviewed,
+                "price_comparisons": price_comparisons,
+                "search_requirements": requirements,
+                "candidate_ids": candidate_ids,
                 "report": report,
                 "next_action": action,
             }
@@ -858,8 +1027,12 @@ class ResearchRuntime:
                     "seen_evidence": {},
                     "read_items": [],
                     "read_snapshots": {},
+                    "calculation_reviewed": False,
+                    "price_comparisons": [],
                     "item_ids": [item["item_id"] for item in manifest],
                     "report": None,
+                    "search_requirements": None,
+                    "candidate_ids": [],
                 }
             result = graph.invoke(graph_input, config)
             state = graph.get_state(config)

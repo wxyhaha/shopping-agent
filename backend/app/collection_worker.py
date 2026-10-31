@@ -17,6 +17,19 @@ def main():
         raise SystemExit(2)
     payload = json.loads(request.read_text(encoding="utf-8"))
     settings = Settings(_env_file=None, **payload["settings"])
+    if payload.get("operation") == "search":
+        from app.product_search import ProductSearch
+        from app.search_schemas import SearchProductsArgs
+
+        output = ProductSearch(settings)._search(
+            SearchProductsArgs.model_validate(payload["request"]),
+            time.monotonic() + settings.browser_timeout_seconds,
+            lambda: None,
+        )
+        Path(payload["output_path"]).write_text(
+            json.dumps(output, ensure_ascii=False), encoding="utf-8"
+        )
+        return
     identity = product_url_identity(payload["url"])
     if not identity:
         raise SystemExit(2)
