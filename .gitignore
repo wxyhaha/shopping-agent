@@ -40,6 +40,12 @@ node_modules/
 .turbo/
 *.tsbuildinfo
 
+# Dart/Flutter tooling, in case this template is reused
+.dart_tool/
+.packages
+*.dill
+.flutter-plugins
+
 # General generated files and local runtime data
 build/
 dist/

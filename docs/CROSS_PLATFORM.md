@@ -30,10 +30,22 @@ Windows 首次运行全套出现 2 项失败，经定位均为平台语义差异
 
 修正后 Windows 全套 **100 项通过、1 项跳过**（跳过项需要可见桌面），连续三次分段运行稳定；Linux 复跑对应文件 7 项通过，两个平台未出现回归。
 
+### Windows 侧模型网关与真实研究
+
+迁移后补齐本机私有 `.env`（仅复制变量，不打印值，`git check-ignore` 确认为 `.gitignore:12`）。数据从 `.runtime\restored-data\` 移到默认目录 `%LOCALAPPDATA%\shopping-agent`，启动不再需要 `SHOPPING_AGENT_DATA_DIR`。随后验证：
+
+- `GET /models` 返回 200，3.42 秒。
+- 真实工具调用协议：模型返回 `read_product_evidence`，6.69 秒，用量 2126 tokens。
+- 对任务 `6dfbb000` 发起真实研究：**completed**，72 秒，4 次模型调用、4 次工具调用，单次最慢 32.05 秒（上限 60 秒）。
+- 最终报告 `outcome=recommendation`，`price_comparisons` 首次真实持久化：山泽 ¥52.37 与绿联 ¥55.60 同为“优惠前”口径，差额 ¥3.23，以较高标价为分母 5.81%；15 m 同维度单位价 ¥3.491333/m 与 ¥3.706667/m，每米差 ¥0.215333。每项金额、规格与价格均带证据引用。
+- 报告中把“六类千兆 / 扁平 / 15m”限定为已对齐的共同维度，未称为同款；把“升级纯铜芯”“传输快且稳”标为商家文案；到手价、AWG、屏蔽层与品牌字段列为未知。
+
+本次运行的两次 `submit_report` 事件是设计内的“先核算后定稿”，已把事件标签区分为“核算价格并核对报告（待定稿）”与“（已定稿）”，避免时间线误读为重复提交。
+
 ### 仍待验证
 
 - Windows 原生前端构建、静态网页由 Windows 服务提供、任务保存在 Windows 侧均已在本次执行；Windows 上的 Chrome/Edge 扩展实际加载与真实平台采集仍未验收。
-- `.env` 未随迁移复制，Windows 侧模型配置需自行准备；未复制任何凭据进仓库。
+- 真实研究仍只覆盖天猫单一平台与网线品类；淘宝、京东真实采集和替代搜索的真实平台结果仍待验证。
 - 备份包 `.runtime/backups/migrate-to-windows/` 与恢复目录含私有数据，均处于忽略目录，不进入 Git。
 
 ## 2026-10-29 实测范围
@@ -68,7 +80,7 @@ Pop-Location
 Invoke-RestMethod http://127.0.0.1:8000/health/ready
 ```
 
-网页开发仍参考 README 的 Node/前端步骤。使用已生成的 `frontend/dist/` 时，后台可直接提供静态网页；需要后台自主浏览时，另在对应 Windows 环境安装 Playwright Chromium，不能沿用 WSL 浏览器路径。本轮没有声称该 Windows 浏览器步骤通过。
+网页开发参考 README 的 Windows 步骤。2026-10-31 已在 Windows 实机完成：`npm run build:web`、`build:chrome`、`build:edge` 三项构建通过；由 Windows 服务提供 `frontend/dist` 静态页，`/`、`/favicon.svg`、5 个 JS/CSS 资源、SPA 深链接 `/tasks/<id>` 与同源 `/api/v1/tasks` 均返回 200。用无头 Chromium 实际渲染首页与任务详情页，`#root` 已挂载、最近任务列出 5 项、任务页可见 3 074 字符，控制台错误与失败请求均为 0。Playwright Chromium 已在该 Windows 环境安装，不再沿用 WSL 浏览器路径。
 
 私有模型配置应在本机单独配置；备份与恢复见 [数据恢复](DATA_RECOVERY.md)。测试通过不需要复制用户密钥、会话或购物数据。
 

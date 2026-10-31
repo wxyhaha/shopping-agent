@@ -10,7 +10,7 @@ from sqlalchemy import URL
 from app.agent_schemas import ResearchReport
 from app.main import create_app
 from app.models import CaptureSnapshot, utc_now
-from app.research_agent import AgentFailure
+from app.research_agent import AgentFailure, ResearchRuntime
 
 
 def tool(name, arguments):
@@ -304,3 +304,15 @@ def test_calculation_uses_exact_read_snapshots_and_rejects_foreign_snapshot(tmp_
             task["id"], ids, {ids[0]: snapshots[1], ids[1]: snapshots[1]}
         )
         assert result[0]["status"] == "unavailable"
+
+
+def test_submit_report_stages_are_labelled_apart_from_rejections():
+    """The two-step report confirmation must not read as a duplicated submission."""
+    runtime_tool_label = ResearchRuntime._tool_label
+    assert runtime_tool_label("submit_report", {"status": "review_required"}).endswith("（待定稿）")
+    assert runtime_tool_label("submit_report", {"status": "accepted"}).endswith("（已定稿）")
+    rejected = {"error": "报告包含未读取或不存在的证据引用，请修正引用。"}
+    assert runtime_tool_label("submit_report", rejected) == "执行 submit_report"
+    assert runtime_tool_label("read_product_evidence", {"snapshot_id": "s"}) == (
+        "执行 read_product_evidence"
+    )

@@ -22,6 +22,7 @@
 
 - 2026-10-31 起主开发位置为 Windows 本机 `D:\studyPlace\shopping-agent`；WSL 侧 `/srv/deeptutor/data/user/workspace/my-project/shopping-agent` 仅为 DeepTutor 伴读保留的同步镜像，保持原位以沿用既有容器挂载。
 - 两侧只通过 Git 同步：Windows 提交推送，WSL 执行 `git pull --ff-only`。不在镜像上做日常开发，不把文件共享当成同步手段。
+- 用 DeepTutor 学习前必须先同步源码：确认 Windows 已推送，再到宿主 `/srv/deeptutor/data/user/workspace/my-project/shopping-agent` 执行 `git pull --ff-only origin main`，并用 `git rev-list --left-right --count origin/main...main` 核对为 `0	0`。同步入口与步骤只在 [README](README.md) 的“用 DeepTutor 学习前，先到这里更新源码”维护，不在其他文件重复。镜像落后或带未提交改动时，不能当作当前代码讲解。
 - 路径拼接使用 pathlib 或相应语言的标准跨平台 API；文本路径使用正斜杠 /。严禁硬编码 Windows 反斜杠路径。
 - 文件名、目录名、模块导入、资源引用和文档链接的大小写严格一致；避免仅大小写不同的同名文件。Windows 文件系统不区分大小写，新增文件时更要核对。
 - 不把当前 /srv 或 D:\ 目录硬编码成产品运行的唯一位置；运行时目录相对于项目根、应用数据目录或配置解析。

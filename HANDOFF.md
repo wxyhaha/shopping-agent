@@ -1,6 +1,18 @@
 # 最近一次交接
 
-## 最新检查点：主开发迁移到 Windows（2026-10-31）
+## 最新检查点：Windows 真实运行达标、文档与代码债收口（2026-10-31）
+
+- 用户要求处理六项文档更新与三项代码债，并明确“下次用 DeepTutor 学习时要去哪里更新源码”。本轮全部完成，另补充测试与事件标签改动。
+- Windows 实机新证据：`.env` 已配置（仅变量名记录，`git check-ignore` 确认为 `.gitignore:12`）；数据从 `.runtime\restored-data\` 落到默认目录 `%LOCALAPPDATA%\shopping-agent`，启动不再需要 `SHOPPING_AGENT_DATA_DIR`。网关 `/models` 200（3.42 秒），真实工具调用 6.69 秒。
+- 真实研究：任务 `6dfbb000` completed，72 秒、4 次模型调用、4 次工具调用，单次最慢 32.05 秒（上限 60 秒）。`price_comparisons` **首次真实持久化**：同为“优惠前”口径的 ¥52.37 / ¥55.60，差额 ¥3.23、以较高标价为分母 5.81%，15 m 同维度单位价 ¥3.491333/m 与 ¥3.706667/m，每米差 ¥0.215333，均带证据引用。此前 13 份历史报告该字段全为空。
+- 前端：Windows 服务提供 `frontend/dist`，首页、图标、5 个 JS/CSS 资源、SPA 深链接与同源 API 全 200；无头 Chromium 实际渲染首页（最近任务 5 项）与任务页（3 074 字符），控制台错误与失败请求为 0。
+- 代码债处理：`submit_report` 事件标签按 `status` 区分为“（待定稿）”与“（已定稿）”；`background_collector.py` 的 Ruff 格式差异已修，全仓 53 个文件格式干净；`.gitignore` 补 Dart/Flutter 条目。
+- 文档收口：README 修正 Windows 验证状态并新增“用 DeepTutor 学习前，先到这里更新源码”一节；AGENTS 固化同一条同步规则；STATUS、本文件、跨平台记录、研究记录同步补充证据。
+- DeepTutor 源码更新入口（唯一定义处）：在 WSL 宿主 `/srv/deeptutor/data/user/workspace/my-project/shopping-agent` 执行 `git pull --ff-only origin main`，并用 `git rev-list --left-right --count origin/main...main` 核对为 `0	0`；容器内读 `/workspace/my-project/shopping-agent`。细节只在 README 维护，其他文件仅引用。
+- 仍未验收：Windows 上 Chrome/Edge 扩展实际加载与真实平台采集；淘宝、京东真实采集与替代搜索的真实平台结果；多品类真实核算。快照 20 份仍全部来自 `tmall`。
+- 下一动作：真实京东或淘宝采集，把“双平台”从声明变成证据；随后多品类验证单位价显示与拒绝错误换算。
+
+## 此前检查点：主开发迁移到 Windows（2026-10-31）
 
 - 用户决定：改为 Windows 端用 AI agent 开发；DeepTutor 伴读推迟到开发完成后再做，因此代码不再需要留在 WSL 挂载目录内。
 - 当前基线：`main` / `b86f5d1`。`e2295bd` 提交 33 项变更（替代搜索、确定性价格核算、双库备份），`b86f5d1` 修正两处 Windows 平台测试假设；两次均已推送，本地与远端一致。

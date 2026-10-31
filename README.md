@@ -43,10 +43,11 @@ T020 的网页、扩展与持久化任务流程已由用户验收通过。当前
 2026-10-31 起主开发位置为 Windows 本机，WSL 仅作 DeepTutor 伴读的只读镜像。
 
 - 主开发目录（Windows）：D:\studyPlace\shopping-agent；后台、网页、扩展构建、测试与浏览器均在此运行。
+- Windows 数据目录：`%LOCALAPPDATA%\shopping-agent`（`platformdirs` 解析结果）。业务库、LangGraph 检查点、`browser-sessions/` 都在这里；迁移用的 `.runtime\` 副本只是历史备份。正常启动不需要再设置 `SHOPPING_AGENT_DATA_DIR`。
 - WSL 镜像目录：/srv/deeptutor/data/user/workspace/my-project/shopping-agent；保持在原位，供 DeepTutor 容器以现有挂载读取，不需要改 Docker 配置。
 - 两侧只用 Git 同步，不共享文件系统：在 Windows 提交并推送后，WSL 镜像执行 `git pull --ff-only`。镜像不用于日常开发，也不要直接在其上产生未提交改动。
-- 数据目录各自独立：Windows 使用本机 `platformdirs` 用户数据目录，WSL 保留原有目录。迁移时的备份与恢复步骤见 [跨平台记录](docs/CROSS_PLATFORM.md)。
-- 代码共享不代表运行环境、依赖、浏览器会话或模型配置自动共享；`.env` 与登录态需按机器单独准备。
+- WSL 侧保留迁移时的真实数据目录，仅供回滚与对照；不停留两套服务同时处理同一研究。
+- 代码共享不代表运行环境、依赖、浏览器会话或模型配置自动共享；`.env` 与登录态需按机器单独准备。Windows 的 `.env` 已在本机配置，不进入仓库。
 
 在 Windows 终端进入项目：
 
@@ -104,6 +105,33 @@ git pull --ff-only origin main
 
 DeepTutor 容器内对应路径为 `/workspace/my-project/shopping-agent`，沿用的是宿主 `/srv/deeptutor/data/user/workspace` 的既有挂载。若希望容器就读复制代码，需要另行评审 Windows 路径的 Docker 挂载并修改 Docker 配置，当前未做。
 
+### 用 DeepTutor 学习前，先到这里更新源码
+
+学习阶段的代码来源只有一处：**WSL 镜像**。它由 Git 与 Windows 主开发目录保持一致，不要手动复制文件、不要让容器去读 Windows 目录。
+
+固定顺序：
+
+1. 在 Windows 完成开发并提交、推送：`git push origin main`。未推送的改动不会出现在学习环境里。
+2. 在 WSL 更新镜像，落到宿主 `/srv/deeptutor/data/user/workspace/my-project/shopping-agent`：
+
+~~~bash
+cd /srv/deeptutor/data/user/workspace/my-project/shopping-agent
+git pull --ff-only origin main
+git log --oneline -1
+~~~
+
+3. 确认镜像与远端一致，再让 DeepTutor 开始学习：
+
+~~~bash
+git rev-list --left-right --count origin/main...main
+~~~
+
+输出必须是 `0	0`；否则先解决镜像差异，不要让伴读基于旧代码或带未提交改动的代码讲解。
+
+4. 容器内读取的位置是 `/workspace/my-project/shopping-agent`，与宿主是同一份文件。改 Docker 或宿主路径都要单独评审，不擅改容器配置。
+
+学习材料与代码一起更新：`PLAN.md`、`STATUS.md`、`HANDOFF.md` 与 `docs/` 同在这次 pull 内，DeepTutor 应引用当前版本而不是旧检查点。镜像只用于阅读与伴读，不在其上安装项目依赖或运行开发命令；需要运行演示时，仍在 Windows 主开发目录执行。
+
 浏览器打开 `http://127.0.0.1:5173/`。Vite 会把 `/api` 和 `/health` 请求代理到后台。执行生产网页构建后，FastAPI 也会在 `http://127.0.0.1:8000/` 提供网页。
 
 Chrome 的未打包目录为 `frontend/.output/chrome-mv3`，Edge 为 `frontend/.output/edge-mv3`。在各浏览器扩展管理页打开开发者模式并选择对应目录可进行本机加载。改动扩展权限或内容脚本后需在扩展管理页重新加载扩展，并刷新已打开的商品页。扩展默认访问 `http://127.0.0.1:8000`；使用 Vite 开发页时，在扩展弹窗的“本地服务地址”中改为 `http://127.0.0.1:5173`。用户确认本轮扩展和任务管理人工验收通过。
@@ -124,7 +152,7 @@ Windows 上若增加 Shell 脚本，仍须首行 #!/usr/bin/env bash，并在此
 
 ## 文本和 Git 规则
 
-2026-10-29 Windows 原生隔离副本已完成 53 项后台核心检查，以及服务启动、任务保存和备份恢复；DeepTutor 容器可见同版本代码。实际范围、PowerShell 恢复步骤与未验收边界见 [跨平台记录](docs/CROSS_PLATFORM.md)。Windows 浏览器与前端本机构建仍需单独验收。
+2026-10-31 Windows 实机已完成：后端全套 100 项通过、1 项因无可见桌面跳过；前端 typecheck、扩展通道 6 项、网页与 Chrome/Edge 构建通过；生产静态页由 Windows 服务提供并经无头 Chromium 渲染核对，无控制台错误。真实模型研究在同一 Windows 环境完成。实际范围与未验收边界见 [跨平台记录](docs/CROSS_PLATFORM.md)。Windows 上的 Chrome/Edge 扩展实际加载与真实平台采集仍需单独验收。
 
 - 新建与编辑的文件统一 UTF-8、LF；编辑器规则见 [.editorconfig](.editorconfig)。
 - Git 规则见 [.gitattributes](.gitattributes)：默认文本 LF，Shell 文件 LF，批处理文件在 Git 检出时使用 CRLF。这是 Git 检出策略；本次新建文件均为 LF。

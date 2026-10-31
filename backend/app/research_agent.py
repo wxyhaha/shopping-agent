@@ -910,7 +910,7 @@ class ResearchRuntime(SearchRuntimeMixin):
                 run_id,
                 f"tool-{state['turns']}",
                 "tool",
-                f"执行 {name}",
+                self._tool_label(name, result),
                 {
                     "tool": name,
                     "input": args,
@@ -975,6 +975,17 @@ class ResearchRuntime(SearchRuntimeMixin):
             "tool_call_id": call["id"],
             "content": json.dumps(result, ensure_ascii=False),
         }
+
+    @staticmethod
+    def _tool_label(name: str, result: dict) -> str:
+        """submit_report runs twice by design; keep the two steps distinguishable."""
+        if name == "submit_report":
+            status = result.get("status")
+            if status == "review_required":
+                return "核算价格并核对报告（待定稿）"
+            if status == "accepted":
+                return "核算价格并核对报告（已定稿）"
+        return f"执行 {name}"
 
     def _work(self, run_id: str, answer: str | None) -> None:
         connection = None

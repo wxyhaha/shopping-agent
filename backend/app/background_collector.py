@@ -82,9 +82,7 @@ def ipv4_addresses(host: str) -> list[str]:
     return list(
         {
             row[4][0]
-            for row in socket.getaddrinfo(
-                host, 443, type=socket.SOCK_STREAM, family=socket.AF_INET
-            )
+            for row in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM, family=socket.AF_INET)
         }
     )
 
