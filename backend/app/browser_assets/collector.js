@@ -182,6 +182,7 @@ var ShoppingAgentCollector = (function(exports) {
 				"#J_DivItemDesc",
 				"#description",
 				"#detailContent",
+				"[class*='descV8']",
 				"[class*='detail-content']",
 				"[class*='detailContent']",
 				".page-content-area"
@@ -770,7 +771,7 @@ var ShoppingAgentCollector = (function(exports) {
 				field_path: `images.${kind}`,
 				status: loadedCount ? "observed" : "missing",
 				note: loadedCount ? `发现 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无可用的已加载图片。",
-				evidence_ids: imageEvidence
+				evidence_ids: imageEvidence.slice(0, 20)
 			});
 		}
 		collectImages("gallery", selectors.gallery);
@@ -787,7 +788,7 @@ var ShoppingAgentCollector = (function(exports) {
 		return {
 			schema_version: 1,
 			adapter_id: `${platform}-dom`,
-			adapter_version: "0.2.0",
+			adapter_version: "0.3.0",
 			page_url: pageUrl,
 			canonical_url: canonicalUrl,
 			captured_at: (/* @__PURE__ */ new Date()).toISOString(),

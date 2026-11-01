@@ -23,6 +23,8 @@ from app.collection_process import (
     run_collection_process,
 )
 from app.config import Settings
+from app.detail_vision import read_detail_image
+from app.image_fetch import fetch_image
 from app.models import utc_now
 from app.price_vision import looks_obfuscated, read_rendered_price
 from app.schemas import CaptureSnapshotSubmit
@@ -35,6 +37,8 @@ PRICE_ELEMENT_SELECTORS = (
     ".price_wrap, #priceFloor, #summary-price, .summary-price, "
     "[class*='SkuPanel'] [class*='price'], [itemprop='price'], [class*='price']"
 )
+# How many detail images may be read per collection; artwork can run to dozens.
+DETAIL_IMAGE_LIMIT = 3
 RESOURCE_DOMAINS = (
     "taobao.com",
     "tmall.com",
@@ -393,6 +397,10 @@ class BackgroundCollector:
             screenshot = result.get("price_screenshot_png")
             if snapshot and screenshot and self.settings.price_vision_enabled:
                 snapshot = self._apply_vision_price(snapshot, screenshot)
+            if snapshot and self.settings.detail_vision_enabled:
+                # Detail artwork is pixels, so its words need a vision read. This runs here,
+                # not in the worker, because only this process holds the model credentials.
+                snapshot = self._apply_detail_vision(snapshot, identity.platform, check_cancel)
             return CollectionResult(
                 CaptureSnapshotSubmit.model_validate(snapshot) if snapshot else None,
                 result.get("error_code"),
@@ -430,6 +438,75 @@ class BackgroundCollector:
             )
         finally:
             self.slots.release()
+
+    def _apply_detail_vision(self, snapshot: dict, platform: str, check_cancel):
+        """Read text from detail images and record it as marketing material, not as fact.
+
+        The recognised words are stored under their own field path so a report can cite the
+        image they came from. They never become entries in the specification table: a badge
+        painted on artwork is the seller's claim, not a measured attribute.
+        """
+        # The image record carries no kind field; whether an image belongs to the detail
+        # section is only recorded in the evidence path ("images.detail[<index>]").
+        detail_indexes = {
+            entry["field_path"].split("[", 1)[1].rstrip("]")
+            for entry in snapshot.get("evidence", [])
+            if entry.get("field_path", "").startswith("images.detail[")
+        }
+        images = [
+            image
+            for image in snapshot.get("images", [])
+            if image.get("source_url") and str(image.get("index")) in detail_indexes
+        ]
+        if not images:
+            return snapshot
+        policy = BrowserNetworkPolicy(
+            self.resolver, trust_fake_ip_dns=self.settings.browser_trust_fake_ip_dns
+        )
+        coverage = snapshot.setdefault("coverage", [])
+        read_any = False
+        skipped: list[str] = []
+        # Bound how many images are read per collection; artwork can run to dozens.
+        for image in images[:DETAIL_IMAGE_LIMIT]:
+            check_cancel()
+            content, note = fetch_image(image["source_url"], platform, policy)
+            if content is None:
+                skipped.append(note)
+                continue
+            lines, note = read_detail_image(content, self.settings)
+            if not lines:
+                skipped.append(note)
+                continue
+            read_any = True
+            evidence_id = f"detail-text-{image.get('index', 0)}"
+            snapshot.setdefault("evidence", []).append(
+                {
+                    "evidence_id": evidence_id,
+                    "field_path": f"detail_images[{image.get('index', 0)}].text",
+                    "source": "detail_image_vision",
+                    "excerpt": " / ".join(lines)[:512],
+                    "locator": image["source_url"][:2048],
+                }
+            )
+            coverage.append(
+                {
+                    "field_path": f"detail_images[{image.get('index', 0)}].text",
+                    # Deliberately not "observed": the wording is a merchant claim.
+                    "status": "ambiguous",
+                    "note": note,
+                    "evidence_ids": [evidence_id],
+                }
+            )
+        if not read_any:
+            coverage.append(
+                {
+                    "field_path": "detail_images.text",
+                    "status": "missing",
+                    "note": skipped[0] if skipped else "未读取详情图文字。",
+                    "evidence_ids": [],
+                }
+            )
+        return snapshot
 
     def _apply_vision_price(self, snapshot: dict, encoded_png: str) -> dict:
         """Replace a font-obfuscated amount with the value the browser actually painted."""

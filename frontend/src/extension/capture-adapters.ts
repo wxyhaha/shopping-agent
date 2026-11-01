@@ -46,7 +46,9 @@ const SELECTORS: Record<Platform, AdapterSelectors> = {
     sku: [".skuOptionsArea", "[class*='skuOptionsArea']", "#J_isku", ".tb-sku"],
     specifications: ["#J_AttrUL", "#attributes", ".J_AttrList", "[class*='attr-list']", "[class*='attributes']", ".page-content-area"],
     gallery: [".picGalleryEle", "#J_ImgBooth", "#spec-list", "[class*='picGallery']"],
-    details: ["#J_DivItemDesc", "#description", "#detailContent", "[class*='detail-content']", "[class*='detailContent']", ".page-content-area"],
+    // Tmall's current detail section uses the `descV8-` prefix; the older #J_DivItemDesc
+    // ids no longer exist on the redesigned item page.
+    details: ["#J_DivItemDesc", "#description", "#detailContent", "[class*='descV8']", "[class*='detail-content']", "[class*='detailContent']", ".page-content-area"],
   },
   jd: {
     // JD's PC item host answers with a risk-control page, so collection uses the mobile
@@ -551,7 +553,9 @@ export function collectCurrentProductSnapshot(
       field_path: `images.${kind}`,
       status: loadedCount ? "observed" : "missing",
       note: loadedCount ? `发现 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无可用的已加载图片。",
-      evidence_ids: imageEvidence,
+      // A gallery or detail section can hold far more images than the contract's evidence
+      // cap; the count above still reports the true total.
+      evidence_ids: imageEvidence.slice(0, 20),
     });
   }
 

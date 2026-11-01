@@ -112,7 +112,16 @@ CaptureFieldStatus = Literal[
     "not_applicable",
 ]
 CaptureResultStatus = Literal["complete", "partial", "blocked", "failed"]
-EvidenceSource = Literal["visible_dom", "json_ld", "user_confirmed", "image_metadata", "navigation"]
+EvidenceSource = Literal[
+    "visible_dom",
+    "json_ld",
+    "user_confirmed",
+    "image_metadata",
+    # Text read out of product detail artwork by a vision model. Kept distinct because it is
+    # merchant marketing copy, not a measured attribute.
+    "detail_image_vision",
+    "navigation",
+]
 PriceKind = Literal[
     "current",
     "list",

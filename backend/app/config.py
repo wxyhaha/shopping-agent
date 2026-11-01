@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # Read a font-obfuscated price from the rendered screenshot. Off by default so the
     # normal path never spends a vision request on pages that expose plain text.
     price_vision_enabled: bool = False
+    # Read text from product detail artwork. Separate switch: it costs a vision request per
+    # image and its output is merchant marketing copy, not verified specification.
+    detail_vision_enabled: bool = False
 
     @property
     def browser_session_dir(self) -> Path:
