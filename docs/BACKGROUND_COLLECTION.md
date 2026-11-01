@@ -107,6 +107,31 @@ uv run python -m scripts.browser_session jd
 
 **重要限制**：后台 Playwright 环境中 `navigator.webdriver=true`，京东不渲染参数表（headed 模式同样）；未登录时页面也没有该标签。因此京东规格只能通过“已登录的扩展通道”获取，后台采集会缺规格。系统提示与 `capture_product_page` 工具描述已写明。
 
+## 应用数据库迁移要指定目标库（2026-11-01）
+
+`backend/alembic.ini` 的 `sqlalchemy.url` 是相对路径 `sqlite:///shopping_agent.sqlite3`，直接执行 `alembic upgrade head` 会作用到**工作目录下的另一个库**，而服务实际使用的是 `%LOCALAPPDATA%\shopping-agent\shopping_agent.sqlite3`。结果就是迁移“成功”了但服务端没有新列，表现为启动后依旧缺少字段。
+
+正确做法是通过项目入口传入实际数据库：
+
+~~~python
+from app.config import get_settings
+from app.migrations import upgrade_database
+
+upgrade_database(get_settings().database_url)
+~~~
+
+迁移前先复制一份数据库备份；不要用相对路径的 alembic 默认配置对生产数据执行升级。
+
+## 扩展采集失败的诊断能力（2026-11-01）
+
+扩展采集失败曾长期无法定位：失败只记 `error_code`，与租约超时无法区分。现补充：
+
+- `BrowserCaptureFailure` 新增 `detail`（≤200 字符），`browser_capture_jobs` 新增 `error_detail` 列持久化；运行事件的输出带 `error_detail`，`status=expired` 时明确置空以区分超时。
+- `capture-bridge` 不再吞异常：读取失败把原因写入 `detail`；`capture` 过程加 **20 秒超时**（在 30 秒租约内），卡住时上报而非静默到期。
+- 内容脚本分阶段上报（“正在展开规格参数”→“正在读取页面”），展开失败不再中断采集。
+
+据此已排除两种猜测：读取抛错（有 catch 就会写 `detail`，实际为 `None`）、后台标签页定时器节流（页面切到前台仍超时）。实际表现为扩展**领取请求后处理静默中断**（`attempts=2` 且无错误）或**完全不领取**（`attempts=1`）。同一份代码在隔离实例中曾成功采集并落库，故非纯逻辑缺陷；怀疑登录后页面结构使内容脚本操作阻塞，且隔离环境中异常不冒泡到扩展的 catch。**截至 2026-11-01 未定位到根因。**
+
 ## 扩展加载的环境限制（2026-11-01）
 
 Edge 156 与 Chrome 156 均已禁用 `--load-extension` 命令行参数，扩展必须手动在扩展管理页加载。解压加载后点“重新加载”不保证刷新已注入的内容脚本，需要“移除后重新加载”或刷新页面。判断加载的是哪一版看快照里的 `adapter_version`（当前应为 `0.3.0`），不要只看文件时间。

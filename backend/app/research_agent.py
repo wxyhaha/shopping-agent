@@ -679,6 +679,10 @@ class ResearchRuntime(SearchRuntimeMixin):
                     job.status, job.error_code = "expired", "extension_timeout"
                     session.commit()
                 status, snapshot_id, error_code = job.status, job.snapshot_id, job.error_code
+                error_detail = job.error_detail
+                if status == "expired":
+                    # A timeout has no extension message; keep the two cases distinct.
+                    error_detail = None
             if status == "completed" and snapshot_id:
                 result, refs = self._read_evidence(task_id, payload.item_id, snapshot_id)
                 if not result.get("snapshot_id"):
@@ -709,6 +713,8 @@ class ResearchRuntime(SearchRuntimeMixin):
                     "status": "unavailable",
                     "error": errors.get(error_code, "采集请求已停止，未获得新快照。"),
                     "error_code": error_code or status,
+                    # The extension's own message, when it reported one.
+                    "error_detail": error_detail,
                 }, {}
             time.sleep(0.5)
 

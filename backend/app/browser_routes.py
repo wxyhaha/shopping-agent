@@ -190,6 +190,7 @@ def fail_capture(
     job = owned_job(session, job_id, lease_token, payload.client_id)
     if job.status != "completed":
         job.status, job.error_code = "failed", payload.error_code
+        job.error_detail = payload.detail
         session.commit()
     response.headers["Cache-Control"] = "no-store"
     return BrowserCaptureResult(id=job.id, status=job.status, snapshot_id=job.snapshot_id)

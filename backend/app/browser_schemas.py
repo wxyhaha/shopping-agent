@@ -45,6 +45,8 @@ class BrowserCaptureComplete(StrictModel):
 class BrowserCaptureFailure(StrictModel):
     client_id: str = Field(pattern=r"^[a-fA-F0-9-]{36}$")
     error_code: Literal["page_changed", "capture_failed"]
+    # Short diagnostic from the extension so a failure can be told apart from a timeout.
+    detail: str | None = Field(default=None, max_length=200)
 
 
 class BrowserCaptureResult(StrictModel):

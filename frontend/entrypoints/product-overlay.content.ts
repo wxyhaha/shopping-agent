@@ -267,8 +267,16 @@ async function mountProductAssistant(
         pageUrl: () => location.href,
         send: (message) => browser.runtime.sendMessage(message),
         capture: async (url) => {
-          // Reveal a collapsed parameter table, so the snapshot can include it.
-          await expandSpecPanel(document);
+          // Report each stage: a silent stall between these steps was invisible before.
+          setStatus("正在展开规格参数…");
+          let expanded: string | null = null;
+          try {
+            expanded = await expandSpecPanel(document);
+          } catch (cause) {
+            // A failed expansion must not block the capture; record and continue.
+            setStatus(`展开规格参数失败：${cause instanceof Error ? cause.message : String(cause)}`);
+          }
+          setStatus(expanded ? `已展开“${expanded}”，正在读取页面…` : "无需展开，正在读取页面…");
           return collectCurrentProductSnapshot(document, url, document.title);
         },
         status: (message) => setStatus(message),
@@ -410,8 +418,13 @@ async function mountProductAssistant(
     const pageTitle = getCurrentProductTitle(document, document.title).slice(0, 512);
     const targetId = taskSelect.value === "new" ? null : taskSelect.value;
     const targetTitle = selectedTask()?.title ?? "新比较任务";
-    // Submitting a real snapshot: expand a collapsed parameter table first.
-    await expandSpecPanel(document);
+    // Submitting a real snapshot: expand a collapsed parameter table first. A failure here
+    // must not prevent the snapshot from being taken.
+    try {
+      await expandSpecPanel(document);
+    } catch {
+      // Ignored on purpose: the snapshot below is still worth saving.
+    }
     const capture: CaptureSnapshotSubmit = collectCurrentProductSnapshot(document, url, pageTitle);
     const addSignature = JSON.stringify([url, pageTitle, targetId]);
     if (addSignature !== requestSignature) {

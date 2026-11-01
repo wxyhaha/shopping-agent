@@ -22,7 +22,7 @@ type ExtensionRequest =
   | { type: "shopping-agent:list-tasks" }
   | { type: "shopping-agent:claim-capture"; url: string }
   | { type: "shopping-agent:complete-capture"; url: string; jobId: string; leaseToken: string; capture: CaptureSnapshotSubmit }
-  | { type: "shopping-agent:fail-capture"; url: string; jobId: string; leaseToken: string; errorCode: "page_changed" | "capture_failed" }
+  | { type: "shopping-agent:fail-capture"; url: string; jobId: string; leaseToken: string; errorCode: "page_changed" | "capture_failed"; detail?: string }
   | {
       type: "shopping-agent:add-current-page";
       url: string;
@@ -61,7 +61,9 @@ function parseRequest(value: unknown): ExtensionRequest | null {
       return { type: value.type, ...shared, capture: value.capture as unknown as CaptureSnapshotSubmit };
     }
     if (value.type === "shopping-agent:fail-capture" && ["page_changed", "capture_failed"].includes(String(value.errorCode))) {
-      return { type: value.type, ...shared, errorCode: value.errorCode as "page_changed" | "capture_failed" };
+      // The detail is a short diagnostic string, not page content; keep it bounded.
+      const detail = typeof value.detail === "string" ? value.detail.slice(0, 200) : undefined;
+      return { type: value.type, ...shared, errorCode: value.errorCode as "page_changed" | "capture_failed", detail };
     }
     return null;
   }

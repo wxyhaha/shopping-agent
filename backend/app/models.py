@@ -135,3 +135,6 @@ class BrowserCaptureJob(Base):
         nullable=True,
     )
     error_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Short diagnostic from the extension; a capture failure was previously
+    # indistinguishable from a lease timeout, which made the cause hard to find.
+    error_detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
