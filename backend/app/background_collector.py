@@ -23,6 +23,7 @@ from app.collection_process import (
     run_collection_process,
 )
 from app.config import Settings
+from app.detail_dedupe import dedupe_detail_images, dedupe_texts
 from app.detail_vision import read_detail_image
 from app.image_fetch import fetch_image
 from app.models import utc_now
@@ -37,8 +38,9 @@ PRICE_ELEMENT_SELECTORS = (
     ".price_wrap, #priceFloor, #summary-price, .summary-price, "
     "[class*='SkuPanel'] [class*='price'], [itemprop='price'], [class*='price']"
 )
-# How many detail images may be read per collection; artwork can run to dozens.
-DETAIL_IMAGE_LIMIT = 3
+# How many distinct detail images may be read per collection. Detail artwork carries most
+# of the product's real specifications, so this is generous; duplicates are removed first.
+DETAIL_IMAGE_LIMIT = 8
 RESOURCE_DOMAINS = (
     "taobao.com",
     "tmall.com",
@@ -440,11 +442,13 @@ class BackgroundCollector:
             self.slots.release()
 
     def _apply_detail_vision(self, snapshot: dict, platform: str, check_cancel):
-        """Read text from detail images and record it as marketing material, not as fact.
+        """Read detail artwork thoroughly, keeping specifications apart from sales language.
 
-        The recognised words are stored under their own field path so a report can cite the
-        image they came from. They never become entries in the specification table: a badge
-        painted on artwork is the seller's claim, not a measured attribute.
+        Detail sections carry most of a product's real specifications, so the read covers as
+        many distinct images as the limit allows. The same artwork also carries marketing
+        adjectives, so the model tags each item and only ``spec`` items are recorded as
+        specifications — and even those stay attributed to the image rather than being
+        treated as independently verified.
         """
         # The image record carries no kind field; whether an image belongs to the detail
         # section is only recorded in the evidence path ("images.detail[<index>]").
@@ -460,44 +464,56 @@ class BackgroundCollector:
         ]
         if not images:
             return snapshot
+        chosen, duplicates = dedupe_detail_images(images, DETAIL_IMAGE_LIMIT)
         policy = BrowserNetworkPolicy(
             self.resolver, trust_fake_ip_dns=self.settings.browser_trust_fake_ip_dns
         )
         coverage = snapshot.setdefault("coverage", [])
-        read_any = False
+        spec_lines: list[str] = []
+        claim_lines: list[str] = []
+        read_images = 0
         skipped: list[str] = []
-        # Bound how many images are read per collection; artwork can run to dozens.
-        for image in images[:DETAIL_IMAGE_LIMIT]:
+        for image in chosen:
             check_cancel()
             content, note = fetch_image(image["source_url"], platform, policy)
             if content is None:
                 skipped.append(note)
                 continue
-            lines, note = read_detail_image(content, self.settings)
-            if not lines:
+            specs, claims, note = read_detail_image(content, self.settings)
+            if not specs and not claims:
                 skipped.append(note)
                 continue
-            read_any = True
-            evidence_id = f"detail-text-{image.get('index', 0)}"
+            read_images += 1
+            index = image.get("index", 0)
+            evidence_id = f"detail-text-{index}"
             snapshot.setdefault("evidence", []).append(
                 {
                     "evidence_id": evidence_id,
-                    "field_path": f"detail_images[{image.get('index', 0)}].text",
+                    "field_path": f"detail_images[{index}].text",
                     "source": "detail_image_vision",
-                    "excerpt": " / ".join(lines)[:512],
-                    "locator": image["source_url"][:2048],
+                    "excerpt": " / ".join(specs + claims)[:2048],
+                    "locator": image["source_url"][:256],
                 }
             )
             coverage.append(
                 {
-                    "field_path": f"detail_images[{image.get('index', 0)}].text",
-                    # Deliberately not "observed": the wording is a merchant claim.
+                    "field_path": f"detail_images[{index}].text",
+                    # Not "observed": the wording is a merchant claim about the product.
                     "status": "ambiguous",
                     "note": note,
                     "evidence_ids": [evidence_id],
                 }
             )
-        if not read_any:
+            spec_lines.extend(specs)
+            claim_lines.extend(claims)
+        # The same claim often appears on several panels; keep one copy of each.
+        spec_lines = dedupe_texts(spec_lines)
+        claim_lines = dedupe_texts(claim_lines)
+        if spec_lines:
+            self._add_detail_items(snapshot, "spec", spec_lines)
+        if claim_lines:
+            self._add_detail_items(snapshot, "claim", claim_lines)
+        if not read_images:
             coverage.append(
                 {
                     "field_path": "detail_images.text",
@@ -506,7 +522,53 @@ class BackgroundCollector:
                     "evidence_ids": [],
                 }
             )
+        elif duplicates:
+            coverage.append(
+                {
+                    "field_path": "detail_images.dedupe",
+                    "status": "ambiguous",
+                    "note": f"跳过 {duplicates} 张重复或同源的详情图，未重复调用识别。",
+                    "evidence_ids": [],
+                }
+            )
         return snapshot
+
+    def _add_detail_items(self, snapshot: dict, kind: str, lines: list[str]) -> None:
+        """Record recognised detail-image text as its own observation set.
+
+        ``spec`` and ``claim`` are kept under separate paths so neither can be mistaken for
+        the measured specification table (``specs.*``), which comes from the DOM.
+        """
+        evidence_ids = [
+            entry["evidence_id"]
+            for entry in snapshot.get("evidence", [])
+            if entry.get("source") == "detail_image_vision"
+        ][:20]
+        label = "详情图参数" if kind == "spec" else "详情图宣传表述"
+        note = (
+            "来自详情图识别，属商家标注，未经独立核实。"
+            if kind == "spec"
+            else "详情图中的主观或宣传表述，不能作为参数依据。"
+        )
+        for position, line in enumerate(lines, start=1):
+            snapshot.setdefault("fields", []).append(
+                {
+                    "observation_id": f"detail-{kind}-{position:02d}",
+                    "field_path": f"detail_images.{kind}_{position:02d}",
+                    "label": label,
+                    "raw_value": line[:2048],
+                    "status": "ambiguous",
+                    "evidence_ids": evidence_ids,
+                }
+            )
+        snapshot.setdefault("coverage", []).append(
+            {
+                "field_path": f"detail_images.{kind}",
+                "status": "ambiguous",
+                "note": note,
+                "evidence_ids": evidence_ids,
+            }
+        )
 
     def _apply_vision_price(self, snapshot: dict, encoded_png: str) -> dict:
         """Replace a font-obfuscated amount with the value the browser actually painted."""

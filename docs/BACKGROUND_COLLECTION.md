@@ -75,14 +75,25 @@ uv run python -m scripts.browser_session jd
 
 ## 详情图文字读取（2026-11-01）
 
-商品详情区几乎全是商家作图，参数、认证等内容只存在于像素里，DOM 拿不到。新增 `detail_vision` 与 `image_fetch`：
+商品详情区几乎全是商家作图，参数、认证、性能数值等内容只存在于像素里，DOM 拿不到。详情图往往比结构化参数表更完整，因此这部分要读得**全面**，同时必须把**可核对参数**和**宣传话术**分开。
 
-- `image_fetch` 只在 `BrowserNetworkPolicy` 允许的主机上取图，并带平台 Referer（京东、天猫 CDN 均要求）；拒绝非图片响应与超限大小。
-- `detail_vision` 用视觉模型只做**提取**：每行一条、最多 8 行，不含推测；空答案返回空列表。
-- 结果写入独立证据来源 `detail_image_vision`，路径形如 `detail_images[<index>].text`，覆盖状态固定为 `ambiguous`——**它是商家宣传材料，不是核实过的参数**，永远不进入 `specs.*`。
-- 每次采集最多读 3 张详情图（`DETAIL_IMAGE_LIMIT`）；开关 `SHOPPING_AGENT_DETAIL_VISION_ENABLED` 默认关闭。
+四个模块：
 
-真实验证（天猫网线商品）：提取到“家装工程级千兆网线 / 圆/扁/细线可选 / 五重国际认证 / 超六类弯头网线 / 下载约1250MB/S / 七类万兆扁平网线 / 三重屏蔽强抗扰”，快照校验通过。
+- `image_fetch`：只在 `BrowserNetworkPolicy` 允许的主机上取图，并带平台 Referer（京东、天猫 CDN 均要求，否则 403）；拒绝非图片响应、非 200 与超限大小；不跟随重定向。
+- `detail_dedupe`：同一幅图常以多个尺寸、多个 CDN 主机、多种质量后缀重复出现。归一化时忽略主机名、`/s750x750_`、`/n4/`、`!q80.dpg`、`_q50.jpg_.webp` 等投递参数，只保留命名文件的路径尾部；JD 以 `/jfs/` 之后为身份。跨图重复的文字行也去重。
+- `detail_vision`：模型必须输出 JSON，把每项标为 `spec`（可核对参数）或 `claim`（主观/宣传表述）。无法解析成 JSON 时，所有行一律降级为 `claim`——宁可少判参数，也不把宣传语当规格。
+- 写回：`spec` 存为 `detail_images.spec_NN`，`claim` 存为 `detail_images.claim_NN`，两者状态都是 `ambiguous`（商家标注，未经独立核实），且都**不进入 `specs.*`** 参数表。每次采集最多读 8 张**去重后**的详情图。
+
+真实样例（天猫网线商品）分类结果：
+
+| 类别 | 示例 |
+| --- | --- |
+| spec | `欧盟POPs认证`、`EMC电磁兼容认证`、`欧盟REACH认证`、`英国ROHS认证` |
+| claim | `五重国际权威认证`、`上市企业 全球化品牌`、`精工打造，品质之选` |
+
+注意 `五重国际权威认证` 被判为 claim 而具体认证名判为 spec——这正是需要的区分：笼统的“权威”是宣传，具名认证才是可核对项。
+
+**图片字节不落盘、不入库**：下载后仅用于当次识别请求，返回后即丢弃；数据库只保存图片 URL、尺寸与提取出的文字。开关 `SHOPPING_AGENT_DETAIL_VISION_ENABLED` 默认关闭。
 
 顺带修复两处采集缺口：
 
