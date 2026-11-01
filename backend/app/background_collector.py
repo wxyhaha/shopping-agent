@@ -1,5 +1,6 @@
 """Open task product URLs in an isolated headless browser and collect evidence."""
 
+import base64
 import ipaddress
 import re
 import socket
@@ -23,10 +24,17 @@ from app.collection_process import (
 )
 from app.config import Settings
 from app.models import utc_now
+from app.price_vision import looks_obfuscated, read_rendered_price
 from app.schemas import CaptureSnapshotSubmit
+from app.spec_panel import expand_spec_panel
 from app.variant_controller import select_and_capture
 
 COLLECTOR_SCRIPT = Path(__file__).with_name("browser_assets") / "collector.js"
+# The element that paints the price; used when the digits must be read from pixels.
+PRICE_ELEMENT_SELECTORS = (
+    ".price_wrap, #priceFloor, #summary-price, .summary-price, "
+    "[class*='SkuPanel'] [class*='price'], [itemprop='price'], [class*='price']"
+)
 RESOURCE_DOMAINS = (
     "taobao.com",
     "tmall.com",
@@ -37,6 +45,10 @@ RESOURCE_DOMAINS = (
     "360buyimg.com",
     "jdstatic.com",
     "jcloudcs.com",
+    # JD's own static asset host (e.g. jstatic.3.cn/item_v2/price.<hash>.js). The mobile
+    # item page renders its price area from a script served here, so blocking it left the
+    # page with no price element at all rather than a masked one.
+    "3.cn",
 )
 PAGE_SIGNALS = """() => ({
     title: document.title,
@@ -52,6 +64,26 @@ class CollectionResult:
     snapshot: CaptureSnapshotSubmit | None
     error_code: str | None = None
     message: str | None = None
+    # Base64 PNG of the price area when the digits were painted by a custom font. Only the
+    # parent process may read it, so the isolated worker hands the pixels back instead.
+    price_screenshot_png: str | None = None
+
+
+def visible_price_element(page):
+    """Return the first price element that is actually painted.
+
+    A page can hold several price containers, and only one of them is displayed. Taking the
+    first DOM match would select a hidden node whose bounding box is empty, and screenshotting
+    it fails, so the visible one must be chosen explicitly.
+    """
+    for element in page.query_selector_all(PRICE_ELEMENT_SELECTORS):
+        try:
+            box = element.bounding_box()
+        except PlaywrightError:
+            continue
+        if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+            return element
+    return None
 
 
 def session_name(platform: str) -> str:
@@ -71,7 +103,31 @@ def product_navigation_url(identity: ProductUrlIdentity, original_url: str) -> s
         value = (original.get(name) or [""])[0]
         if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value):
             query["skuId" if name == "skuid" else "sku"] = value
-    return urlunsplit(("https", hosts[identity.platform], path, urlencode(query), ""))
+    host = hosts[identity.platform]
+    # JD serves the PC item page behind a risk-control interstitial that also blocks
+    # signed-in visitors, while the mobile host renders the same product. Keep the mobile
+    # host when the caller came from it; compare hosts exactly, because "item.jd.com"
+    # contains the substring "m.jd.com".
+    if identity.platform == "jd" and (urlsplit(original_url).hostname or "").lower() == (
+        "item.m.jd.com"
+    ):
+        host = "item.m.jd.com"
+        path = f"/product/{identity.product_id}.html"
+    return urlunsplit(("https", host, path, urlencode(query), ""))
+
+
+def login_entry_url(identity: ProductUrlIdentity, original_url: str) -> str:
+    """Where the visible login window should open.
+
+    Opening the product page directly is wrong for JD: its PC item host answers with a
+    risk-control page that hides the product even after signing in, so the user would
+    authenticate on a page that cannot show what they came for. The JD home page lets
+    the user sign in first; collection then uses the saved session.
+    """
+    url = product_navigation_url(identity, original_url)
+    if identity.platform == "jd":
+        return urlunsplit(("https", "www.jd.com", "/", "", ""))
+    return url
 
 
 def public_addresses(host: str) -> list[str]:
@@ -122,6 +178,34 @@ class BrowserNetworkPolicy:
             return False
 
 
+def reading_signals(page) -> dict:
+    """Read page signals, tolerating a navigation that replaces the JS context mid-read."""
+    attempt = 0
+    while True:
+        try:
+            return page.evaluate(PAGE_SIGNALS)
+        except PlaywrightError:
+            # A risk-control or login interstitial can replace the document after load.
+            # That is an observed condition, not a collection crash: retry the read.
+            attempt += 1
+            if attempt >= 3:
+                raise
+            try:
+                page.wait_for_timeout(250)
+            except PlaywrightError:
+                raise
+
+
+def interstitial_host(url: str) -> str | None:
+    """Hosts that serve an access interstitial instead of the product page itself."""
+    host = (urlsplit(url).hostname or "").lower()
+    if host == "pc-frequent-pro.pf.jd.com":
+        return "risk_control"
+    if host == "cfe.m.jd.com" and "/risk_handler/" in urlsplit(url).path:
+        return "risk_control"
+    return None
+
+
 def navigation_destination(url: str, expected: ProductUrlIdentity):
     """Check navigation identity without treating a redirect as a rendered page."""
     host = (urlsplit(url).hostname or "").lower()
@@ -132,6 +216,8 @@ def navigation_destination(url: str, expected: ProductUrlIdentity):
         expected.platform,
         expected.product_id,
     ):
+        if interstitial_host(url):
+            return "risk_control", "页面被平台风控拦截，未展示商品内容"
         return "redirected", "页面没有停留在请求的同一商品详情页"
     return None
 
@@ -140,29 +226,63 @@ def access_gate(url: str, signals: dict, expected: ProductUrlIdentity, status: i
     """Return a safe code and an observed static access marker, never account text."""
     if status in {401, 403, 429}:
         return "access_denied", f"HTTP {status}"
+    text, title = signals.get("text", ""), signals.get("title", "")
+    observed = f"{title}\n{text}"
+    # An interstitial is recognised by what the page says. Its URL alone is ambiguous:
+    # JD can serve the block on its own host or replace the product document in place.
+    for pattern, code in (
+        (
+            r"安全验证|滑动验证|请完成验证|请输入验证码|访问受限|验证后继续",
+            "verification_required",
+        ),
+        (
+            r"暂时无法展示该商品的信息|访问过于频繁|当前访问异常|网络环境存在风险",
+            "risk_control",
+        ),
+        (r"请先登录|登录后查看|登录后继续|扫码登录|账号密码登录", "login_required"),
+    ):
+        match = re.search(pattern, observed)
+        if match and not signals.get("hasProduct"):
+            return code, match.group(0)
     destination = navigation_destination(url, expected)
     if destination:
         return destination
-    text, title = signals.get("text", ""), signals.get("title", "")
     if not signals.get("hasProduct"):
-        for pattern, code in (
-            (
-                r"安全验证|滑动验证|请完成验证|请输入验证码|访问受限|验证后继续",
-                "verification_required",
-            ),
-            (r"请先登录|登录后查看|登录后继续|扫码登录|账号密码登录", "login_required"),
-        ):
-            match = re.search(pattern, f"{title}\n{text}")
-            if match:
-                return code, match.group(0)
         if not text.strip():
             return "empty_page", "商品页尚无可读取正文"
         return "product_not_ready", "页面尚未出现可识别的商品详情区域"
     return None
 
 
-def unavailable_snapshot(identity: ProductUrlIdentity, code: str, marker: str, failed=False):
+def access_message(code: str) -> str:
+    """User-facing next step; a risk block is not a login problem."""
+    if code == "risk_control":
+        return (
+            "平台风控拦截了后台访问，未获得商品内容；重新登录通常无效，"
+            "请稍后重试，或用已登录商品页的扩展接管。"
+        )
+    if code == "login_required":
+        return "后台访问需要登录；可打开登录窗口，或用已登录商品页的扩展接管。"
+    return "后台页面受阻，需要登录、验证或人工接管。"
+
+
+def unavailable_snapshot(
+    identity: ProductUrlIdentity,
+    code: str,
+    marker: str,
+    failed=False,
+    *,
+    observed_host: str | None = None,
+    http_status: int | None = None,
+):
     status = "missing" if failed else "blocked"
+    # Keep the observed host and HTTP status so a blocked result can be checked against
+    # what the browser actually received instead of only naming a reason.
+    detail = marker
+    if observed_host:
+        detail = f"{detail}（最终主机 {observed_host}）"
+    if http_status is not None:
+        detail = f"{detail}（HTTP {http_status}）"
     return CaptureSnapshotSubmit.model_validate(
         {
             "adapter_id": f"{identity.platform}-playwright",
@@ -175,7 +295,7 @@ def unavailable_snapshot(identity: ProductUrlIdentity, code: str, marker: str, f
                     "observation_id": "o-access",
                     "field_path": "page.access",
                     "label": "后台页面访问",
-                    "raw_value": marker,
+                    "raw_value": detail,
                     "status": status,
                     "evidence_ids": ["e-access"],
                 }
@@ -186,7 +306,7 @@ def unavailable_snapshot(identity: ProductUrlIdentity, code: str, marker: str, f
                     "evidence_id": "e-access",
                     "field_path": "page.access",
                     "source": "navigation",
-                    "excerpt": marker,
+                    "excerpt": detail,
                     "locator": code,
                 }
             ],
@@ -194,7 +314,7 @@ def unavailable_snapshot(identity: ProductUrlIdentity, code: str, marker: str, f
                 {
                     "field_path": "page.access",
                     "status": status,
-                    "note": marker,
+                    "note": detail,
                     "evidence_ids": ["e-access"],
                 }
             ],
@@ -261,15 +381,20 @@ class BackgroundCollector:
                         "browser_timeout_seconds": self.settings.browser_timeout_seconds,
                         "browser_max_scrolls": self.settings.browser_max_scrolls,
                         "browser_trust_fake_ip_dns": self.settings.browser_trust_fake_ip_dns,
+                        # The worker captures the price pixels; this process reads them,
+                        # because only it holds the model credentials.
+                        "price_vision_enabled": self.settings.price_vision_enabled,
                     },
                 },
                 deadline=deadline,
                 check_cancel=check_cancel,
             )
+            snapshot = result.get("snapshot")
+            screenshot = result.get("price_screenshot_png")
+            if snapshot and screenshot and self.settings.price_vision_enabled:
+                snapshot = self._apply_vision_price(snapshot, screenshot)
             return CollectionResult(
-                CaptureSnapshotSubmit.model_validate(result["snapshot"])
-                if result.get("snapshot")
-                else None,
+                CaptureSnapshotSubmit.model_validate(snapshot) if snapshot else None,
                 result.get("error_code"),
                 result.get("message"),
             )
@@ -305,6 +430,83 @@ class BackgroundCollector:
             )
         finally:
             self.slots.release()
+
+    def _apply_vision_price(self, snapshot: dict, encoded_png: str) -> dict:
+        """Replace a font-obfuscated amount with the value the browser actually painted."""
+        try:
+            image = base64.b64decode(encoded_png)
+        except (ValueError, TypeError):
+            return snapshot
+        amount, note = read_rendered_price(image, self.settings)
+        coverage = snapshot.setdefault("coverage", [])
+        if amount is None:
+            coverage.append(
+                {
+                    "field_path": "price.render",
+                    "status": "ambiguous",
+                    "note": note,
+                    "evidence_ids": [],
+                }
+            )
+            return snapshot
+        filled = False
+        for entry in snapshot.get("prices", []):
+            if looks_obfuscated(entry.get("raw_text")):
+                entry["amount"] = str(amount)
+                entry["status"] = "observed"
+                entry["currency"] = entry.get("currency") or "CNY"
+                filled = True
+        if filled:
+            # An "observed" coverage must cite evidence, and the price entry it belongs to
+            # already carries the DOM evidence for the painted text.
+            price_evidence = [
+                evidence_id
+                for entry in snapshot.get("prices", [])
+                if looks_obfuscated(entry.get("raw_text"))
+                for evidence_id in entry.get("evidence_ids", [])
+            ]
+            coverage.append(
+                {
+                    "field_path": "price.render",
+                    "status": "observed",
+                    "note": note,
+                    "evidence_ids": price_evidence[:20],
+                }
+            )
+        return snapshot
+
+    def _read_obfuscated_price(self, page, raw, check_cancel):
+        """Attach the price screenshot so the caller can read it with the vision model.
+
+        The worker process is deliberately isolated from secrets (``_env_file=None``), so it
+        must not call the gateway. It only captures the pixels and reports that a read is
+        needed; the parent, which holds the model configuration, performs the recognition.
+        """
+        prices = raw.get("prices") or []
+        masked = [entry for entry in prices if looks_obfuscated(entry.get("raw_text"))]
+        if not masked:
+            return raw
+        check_cancel()
+        try:
+            element = visible_price_element(page)
+            if element is None:
+                return self._mark_vision_unavailable(raw, "未找到可截图的价格元素。")
+            image = element.screenshot(timeout=10000)
+        except PlaywrightError:
+            return self._mark_vision_unavailable(raw, "价格区域截图失败。")
+        raw["price_screenshot_png"] = base64.b64encode(image).decode()
+        return raw
+
+    def _mark_vision_unavailable(self, raw, note):
+        raw.setdefault("coverage", []).append(
+            {
+                "field_path": "price.render",
+                "status": "ambiguous",
+                "note": note,
+                "evidence_ids": [],
+            }
+        )
+        return raw
 
     def _collect(self, identity, original_url, deadline, check_cancel, variant_request=None):
         def remaining_ms(limit=15000):
@@ -425,19 +627,25 @@ class BackgroundCollector:
                     if time.monotonic() >= deadline:
                         break
                     page.wait_for_timeout(remaining_ms(250))
-                    signals = page.evaluate(PAGE_SIGNALS)
+                    signals = reading_signals(page)
                     if signals.get("hasProduct"):
                         break
-                signals = page.evaluate(PAGE_SIGNALS)
+                signals = reading_signals(page)
                 gate = navigation_gate or access_gate(
                     page.url, signals, identity, response.status if response else None
                 )
                 if gate:
                     code, marker = gate
                     return CollectionResult(
-                        unavailable_snapshot(identity, code, marker),
+                        unavailable_snapshot(
+                            identity,
+                            code,
+                            marker,
+                            observed_host=(urlsplit(page.url).hostname or "").lower(),
+                            http_status=response.status if response else None,
+                        ),
                         code,
-                        "后台页面受阻，需要登录、验证或人工接管。",
+                        access_message(code),
                     )
                 page.wait_for_timeout(remaining_ms(1200))
                 for _ in range(self.settings.browser_max_scrolls):
@@ -447,6 +655,10 @@ class BackgroundCollector:
                         break
                     page.evaluate("window.scrollBy(0, Math.max(600, innerHeight * .85))")
                     page.wait_for_timeout(remaining_ms(450))
+                check_cancel()
+                # Reveal a collapsed parameter table before parsing; without the click the
+                # table is simply absent from the DOM and would be reported as missing.
+                expanded = expand_spec_panel(page)
                 check_cancel()
                 # Only project-built trusted code is evaluated; merchant text is never executed.
                 script = COLLECTOR_SCRIPT.read_text(encoding="utf-8")
@@ -468,6 +680,21 @@ class BackgroundCollector:
                     )
                 raw["adapter_id"] = f"{identity.platform}-playwright"
                 raw["adapter_version"] = "0.2.0"
+                if expanded:
+                    # Recorded as a note on the loading step: expanding a tab is an action,
+                    # not page evidence, so it must not claim to cite the specification table.
+                    raw.setdefault("coverage", []).append(
+                        {
+                            "field_path": "page.interaction",
+                            "status": "ambiguous",
+                            "note": f"已展开“{expanded}”标签后再读取；展开本身不是参数证据。",
+                        }
+                    )
+                if self.settings.price_vision_enabled:
+                    # The page can render the price through a custom font, leaving only
+                    # private-use characters in the DOM. Capture what was painted; the
+                    # caller reads it, because this code may run in a credential-free worker.
+                    raw = self._read_obfuscated_price(page, raw, check_cancel)
                 if timed_out:
                     raw["status"] = "partial"
                     raw["coverage"].append(
@@ -477,7 +704,11 @@ class BackgroundCollector:
                             "note": "页面等待达到时限，只记录实际加载的资料。",
                         }
                     )
-                return CollectionResult(CaptureSnapshotSubmit.model_validate(raw))
+                screenshot = raw.pop("price_screenshot_png", None)
+                return CollectionResult(
+                    CaptureSnapshotSubmit.model_validate(raw),
+                    price_screenshot_png=screenshot,
+                )
             finally:
                 if context:
                     context.close()

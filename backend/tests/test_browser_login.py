@@ -144,6 +144,52 @@ def test_routes_require_task_scope_and_reject_foreign_origins(tmp_path):
 
 
 @pytest.mark.skipif(not os.environ.get("DISPLAY"), reason="Requires a visible WSL/X desktop")
+def test_jd_login_window_opens_a_sign_in_entry_page(tmp_path):
+    """JD's PC item host hides the product, so the window must open a page a user can sign in on."""
+    from app.background_collector import login_entry_url, product_navigation_url
+    from app.capture_urls import product_url_identity
+
+    identity = product_url_identity("https://item.jd.com/100001.html")
+    assert product_navigation_url(identity, "https://item.jd.com/100001.html") == (
+        "https://item.jd.com/100001.html"
+    )
+    # Collection prefers JD's mobile host, which renders without the risk interstitial.
+    assert product_navigation_url(identity, "https://item.m.jd.com/product/100001.html") == (
+        "https://item.m.jd.com/product/100001.html"
+    )
+    assert login_entry_url(identity, "https://item.jd.com/100001.html") == "https://www.jd.com/"
+    tmall = product_url_identity("https://detail.tmall.com/item.htm?id=1")
+    assert login_entry_url(tmall, "https://detail.tmall.com/item.htm?id=1") == (
+        "https://detail.tmall.com/item.htm?id=1"
+    )
+
+
+def test_entry_note_reports_an_interstitial_without_echoing_page_text():
+    from app.browser_login import read_entry_note
+
+    class Interstitial:
+        def inner_text(self, _):
+            return "当前页面异常 请刷新或切换账户试试 账号 tb12345678"
+
+    note = read_entry_note(Interstitial())
+    assert note and "当前页面异常" in note
+    # Nothing from the page body itself may reach the API surface.
+    assert "tb12345678" not in note
+
+    class Normal:
+        def inner_text(self, _):
+            return "京东(JD.COM)-正品低价"
+
+    assert read_entry_note(Normal()) is None
+
+    class Broken:
+        def inner_text(self, _):
+            raise RuntimeError("driver gone")
+
+    # A driver error must not break the login window.
+    assert read_entry_note(Broken()) is None
+
+
 def test_actual_headed_chromium_window_and_save(tmp_path):
     @contextmanager
     def factory():

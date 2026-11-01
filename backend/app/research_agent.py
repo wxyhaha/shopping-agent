@@ -91,6 +91,10 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 价格计算只能证明价格维度，不能替代品牌、用途与硬条件核验。
 不要声称执行了未提供的操作，也不要由图片 URL 推断参数。
 后台返回 blocked/failed 表示访问受阻或失败，不是商品规格证据；不要仅凭标题给出确定推荐。
+error_code 为 risk_control 表示平台风控拦截，不是登录或验证问题，建议重新登录无效；
+此时应建议稍后重试或改用扩展接管，不要声称用户登录后即可访问。
+京东商品的规格参数只有扩展通道能读取：后台采集在自动化环境中拿不到参数表，
+因此京东任务应使用 capture_product_page（需要用户已打开该商品页），不要用后台采集代替。
 每次只调用一个工具。每条 finding 必须引用工具实际返回的完整 evidence ref，
 不能把页面 SKU 编号当作已确认的规格。完成后调用 submit_report，给出有依据的取舍与未知项。
 报告要让用户可以据此做选择，而不是重复商品标题。summary 使用 2–4 个短段落，先直接回答，
@@ -163,7 +167,9 @@ TOOLS = [
     ),
     tool_schema(
         "capture_product_page",
-        "请求扩展重新读取已打开的同一商品页，等待新快照或明确的超时失败。",
+        "请求扩展重新读取已打开的同一商品页，等待新快照或明确的超时失败。"
+        "扩展运行在用户真实浏览器中，可展开折叠的规格参数表；京东的价格与规格参数"
+        "只有该通道能读取，后台采集会缺少规格参数。",
         CaptureProductPageArgs,
     ),
     tool_schema("ask_user", "向用户确认影响判断的关键条件，持久化暂停并等待回答。", AskUserArgs),
@@ -595,9 +601,26 @@ class ResearchRuntime(SearchRuntimeMixin):
                 ),
                 "页面访问失败",
             )
-            output["error"] = (
-                f"后台采集受阻：{access_note}。可完成独立登录，或使用已登录商品页的扩展接管。"
+            access_code = next(
+                (
+                    evidence.get("locator")
+                    for evidence in output.get("evidence", [])
+                    if evidence.get("field_path") == "page.access"
+                ),
+                None,
             )
+            output["access_code"] = access_code
+            if access_code == "risk_control":
+                # A risk block is not fixed by logging in; say so instead of suggesting it.
+                output["error"] = (
+                    f"后台采集被平台风控拦截：{access_note}。"
+                    "这不是登录问题，重新登录通常无效；请稍后重试，"
+                    "或用已登录商品页的扩展接管。"
+                )
+            else:
+                output["error"] = (
+                    f"后台采集受阻：{access_note}。可完成独立登录，或使用已登录商品页的扩展接管。"
+                )
         self._emit(
             run_id,
             event_id,

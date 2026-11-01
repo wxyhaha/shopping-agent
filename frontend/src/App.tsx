@@ -587,6 +587,8 @@ function CaptureSnapshotDetails({ snapshot }: { snapshot: CaptureSnapshot }) {
   const missingCoverage = coverage.filter((entry) => ["missing", "ambiguous", "blocked"].includes(entry.status));
   const platformLabel = snapshot.platform === "jd" ? "京东" : snapshot.platform === "tmall" ? "天猫" : "淘宝";
   const captureStatus = snapshot.status === "complete" ? "采集完整" : snapshot.status === "blocked" ? "页面受阻" : snapshot.status === "failed" ? "采集失败" : "部分采集";
+  const accessEntry = evidence.find((entry) => entry.field_path === "page.access");
+  const accessCode = accessEntry?.locator || "";
 
   return (
     <article className="capture-snapshot-card">
@@ -599,6 +601,20 @@ function CaptureSnapshotDetails({ snapshot }: { snapshot: CaptureSnapshot }) {
         <div><span>已加载商品图</span><strong>{loadedImages} 张 · 仅保存来源和尺寸</strong></div>
         <div><span>页面价格</span><strong>{prices.length ? prices.map((price) => price.raw_text || "未知价格").join("；") : "未识别"}</strong></div>
       </div>
+      {["blocked", "failed"].includes(snapshot.status) && accessEntry && (
+        <Alert className="form-alert" showIcon
+          type={accessCode === "risk_control" ? "error" : "warning"}
+          message={
+            accessCode === "risk_control" ? `${platformLabel}风控拦截了后台访问`
+              : accessCode === "login_required" ? `${platformLabel}要求先登录`
+                : `${platformLabel}页面访问受阻`
+          }
+          description={
+            accessCode === "risk_control"
+              ? `${accessEntry.excerpt || "平台未返回商品内容"}。重新登录通常无效，请稍后重试或换用扩展接管。`
+              : `${accessEntry.excerpt || "平台未返回商品内容"}。可完成独立登录，或使用扩展接管后重试。`
+          } />
+      )}
       {snapshot.variant_verification && <Alert className="form-alert" showIcon
         type={snapshot.variant_verification.status === "selected" ? "success" : "warning"}
         message={snapshot.variant_verification.status === "selected" ? "本次规格选择已核对" : "本次规格选择尚未核对成功"}

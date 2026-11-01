@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     browser_timeout_seconds: float = Field(default=55.0, ge=15, le=120)
     browser_max_scrolls: int = Field(default=6, ge=0, le=12)
     browser_trust_fake_ip_dns: bool = False
+    # Read a font-obfuscated price from the rendered screenshot. Off by default so the
+    # normal path never spends a vision request on pages that expose plain text.
+    price_vision_enabled: bool = False
 
     @property
     def browser_session_dir(self) -> Path:

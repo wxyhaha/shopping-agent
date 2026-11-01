@@ -194,6 +194,13 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
     return event.kind === "tool" && ["collect_product_page", "inspect_product_variants", "select_product_variant"].includes(String(event.data.tool)) &&
       output?.mode === "headless" && ["blocked", "failed"].includes(output.capture_status || "");
   }).map((event) => String((event.data.input as { item_id: string }).item_id)))];
+  // A risk-control block is not solved by logging in, so do not offer the login window for it.
+  const riskBlockedItemIds = new Set((run?.events ?? []).filter((event) => {
+    const output = event.data.output as { access_code?: string | null } | undefined;
+    return event.kind === "tool" && output?.access_code === "risk_control";
+  }).map((event) => String((event.data.input as { item_id: string }).item_id)));
+  const loginItemIds = blockedItemIds.filter((itemId) => !riskBlockedItemIds.has(itemId));
+  const riskItemIds = blockedItemIds.filter((itemId) => riskBlockedItemIds.has(itemId));
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -239,7 +246,9 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
         description="你可以留在工作台。采集结束后会自动继续研究，访问受阻也会保留明确原因。" />}
       {waitingBrowser && <Alert type="info" showIcon message="正在等待浏览器补采集"
         description="请保持对应商品页打开，并确保 Chrome 或 Edge 已重新加载新版扩展。收到新快照后，研究会自动继续；超时会显示原因。" />}
-      {blockedItemIds.map((itemId) => <BrowserLoginPanel key={`${run.id}:${itemId}`} taskId={taskId} itemId={itemId}
+      {riskItemIds.length > 0 && <Alert type="error" showIcon message="平台风控拦截了后台采集"
+        description="这不是登录问题，重新登录通常无效。可以稍后重试后台采集，或在浏览器中打开该商品页后用扩展接管。" />}
+      {loginItemIds.map((itemId) => <BrowserLoginPanel key={`${run.id}:${itemId}`} taskId={taskId} itemId={itemId}
         onSaved={run.status === "needs_input" || ["failed", "interrupted"].includes(run.status) ? async () => {
           await resume.mutateAsync({ id: run.id, answer: "我已在后台独立浏览器中完成登录并保存会话。请使用 collect_product_page 重新打开商品链接核实，不要使用扩展；尚未确认任何商品规格或价格。" });
         } : undefined} />)}

@@ -17,6 +17,9 @@ class BrowserLoginRead(BaseModel):
     platform: Literal["taobao", "jd"]
     status: Literal["opening", "awaiting_user", "saving", "saved", "failed", "cancelled", "expired"]
     error: str | None
+    # Set when the window landed on a platform interstitial instead of a normal page, so
+    # the workbench can say so rather than leaving the user staring at an unusable window.
+    entry_note: str | None = None
 
 
 def check_item(session, task_id, item_id):

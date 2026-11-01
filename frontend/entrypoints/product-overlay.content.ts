@@ -3,6 +3,7 @@ import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root";
 import type { ContentScriptContext } from "wxt/utils/content-script-context";
 import type { components } from "../src/api/schema";
 import { collectCurrentProductSnapshot, getCurrentProductTitle } from "../src/extension/capture-adapters";
+import { expandSpecPanel } from "../src/extension/spec-panel";
 import { pollCaptureBridge } from "../src/extension/capture-bridge";
 import { LAST_TASK_STORAGE_KEY } from "../src/extension/config";
 import { isSupportedMarketplaceUrl, isSupportedProductUrl } from "../src/extension/page-rules";
@@ -265,7 +266,11 @@ async function mountProductAssistant(
       const result = await pollCaptureBridge({
         pageUrl: () => location.href,
         send: (message) => browser.runtime.sendMessage(message),
-        capture: (url) => collectCurrentProductSnapshot(document, url, document.title),
+        capture: async (url) => {
+          // Reveal a collapsed parameter table, so the snapshot can include it.
+          await expandSpecPanel(document);
+          return collectCurrentProductSnapshot(document, url, document.title);
+        },
         status: (message) => setStatus(message),
       });
       bridgeConnection.textContent = result === "failed" ? "自动采集通道已连接，本次请求未完成，请查看工作台。" : "自动采集通道：已连接本机后台";
@@ -405,6 +410,8 @@ async function mountProductAssistant(
     const pageTitle = getCurrentProductTitle(document, document.title).slice(0, 512);
     const targetId = taskSelect.value === "new" ? null : taskSelect.value;
     const targetTitle = selectedTask()?.title ?? "新比较任务";
+    // Submitting a real snapshot: expand a collapsed parameter table first.
+    await expandSpecPanel(document);
     const capture: CaptureSnapshotSubmit = collectCurrentProductSnapshot(document, url, pageTitle);
     const addSignature = JSON.stringify([url, pageTitle, targetId]);
     if (addSignature !== requestSignature) {

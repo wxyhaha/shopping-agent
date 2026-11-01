@@ -6,7 +6,7 @@ type Lease = components["schemas"]["BrowserCaptureLease"];
 export interface CaptureBridgeHost {
   pageUrl(): string;
   send(message: Record<string, unknown>): Promise<unknown>;
-  capture(pageUrl: string): Capture;
+  capture(pageUrl: string): Capture | Promise<Capture>;
   status(message: string): void;
 }
 
@@ -31,7 +31,8 @@ export async function pollCaptureBridge(host: CaptureBridgeHost): Promise<"idle"
   host.status(`研究助手正在重新读取此商品：${job.reason}`);
   let capture: Capture;
   try {
-    capture = host.capture(pageUrl);
+    // The host may expand a collapsed panel first, so this is awaited.
+    capture = await host.capture(pageUrl);
   } catch {
     return fail("capture_failed");
   }

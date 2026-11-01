@@ -13,6 +13,7 @@ from app.background_collector import (
     BrowserNetworkPolicy,
     CollectionResult,
     access_gate,
+    access_message,
     navigation_destination,
     unavailable_snapshot,
 )
@@ -248,3 +249,139 @@ def test_failed_attempt_budget_and_late_cancel_are_enforced(tmp_path, monkeypatc
             runtime._collect_page(run["id"], task_id, "late", args, time.monotonic() + 20)
         with app.state.session_factory() as session:
             assert len(session.scalars(select(CaptureSnapshot)).all()) == 1
+
+
+def test_risk_control_is_not_reported_as_a_redirect():
+    """JD answers a blocked product page with an HTTP 200 interstitial on another host."""
+    identity = product_url_identity("https://item.jd.com/100012043978.html")
+    blocked_url = "https://pc-frequent-pro.pf.jd.com/?from=pc_item&reason=403"
+    blocked_body = "你好，请登录  免费注册\n暂时无法展示该商品的信息，请稍后重试或\n反馈问题"
+
+    assert navigation_destination(blocked_url, identity)[0] == "risk_control"
+    code, marker = access_gate(
+        blocked_url,
+        {"hasProduct": False, "text": blocked_body, "title": "PC频控页 -京东商城"},
+        identity,
+        200,
+    )
+    assert code == "risk_control"
+    # The marker keeps the page's own words so the block can be checked by a human.
+    assert marker == "暂时无法展示该商品的信息"
+    # A marker inside the product page itself must be caught even when the URL is unchanged.
+    assert (
+        access_gate(
+            "https://item.jd.com/100012043978.html",
+            {"hasProduct": False, "title": "京东", "text": "暂时无法展示该商品的信息，请稍后重试"},
+            identity,
+            200,
+        )[0]
+        == "risk_control"
+    )
+    # An ordinary redirect must keep its own code, and a login wall stays a login problem.
+    assert (
+        access_gate(
+            "https://item.jd.com/100002.html",
+            {"hasProduct": False, "title": "某商品", "text": "商品正文"},
+            identity,
+            200,
+        )[0]
+        == "redirected"
+    )
+    assert navigation_destination("https://passport.jd.com/new/login.aspx", identity)[0] == (
+        "login_required"
+    )
+    # A risk block must not be described as something a login can fix.
+    assert "重新登录通常无效" in access_message("risk_control")
+    assert "登录窗口" not in access_message("risk_control")
+    assert "登录窗口" in access_message("login_required")
+
+
+def test_blocked_snapshot_keeps_the_observed_host_and_http_status():
+    identity = product_url_identity("https://item.jd.com/100012043978.html")
+    snapshot = unavailable_snapshot(
+        identity,
+        "risk_control",
+        "页面被平台风控拦截，未展示商品内容",
+        observed_host="pc-frequent-pro.pf.jd.com",
+        http_status=200,
+    )
+    assert snapshot.status == "blocked"
+    assert snapshot.evidence[0].locator == "risk_control"
+    detail = snapshot.fields[0].raw_value
+    assert "pc-frequent-pro.pf.jd.com" in detail
+    assert "HTTP 200" in detail
+    # The legacy call shape must keep working for existing callers.
+    legacy = unavailable_snapshot(identity, "test", "合成受阻")
+    assert legacy.fields[0].raw_value == "合成受阻"
+
+
+def test_reading_signals_survives_a_navigation_after_load(tmp_path):
+    """A risk-control interstitial can replace the document between load and the read."""
+    late_navigation = (
+        "<!doctype html><html><head><title>频控页</title></head><body>"
+        "<div>暂时无法展示该商品的信息，请稍后重试</div>"
+        "<script>setTimeout(() => { location.href = '/risk_handler/?reason=403'; }, 60);</script>"
+        "</body></html>"
+    )
+    served = {"count": 0}
+
+    def route(route):
+        served["count"] += 1
+        body = (
+            late_navigation
+            if served["count"] == 1
+            else (
+                "<!doctype html><html><head><title>频控页</title></head><body>"
+                "<div>暂时无法展示该商品的信息，请稍后重试</div></body></html>"
+            )
+        )
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+
+    service = BackgroundCollector(
+        Settings(_env_file=None, data_dir=tmp_path, browser_max_scrolls=1),
+        route_fixture=route,
+        resolver=lambda _: ["93.184.216.34"],
+    )
+    result = service.collect("https://item.jd.com/100001.html")
+    # It must be a reported access block, never the generic worker failure.
+    assert result.error_code == "risk_control"
+    assert result.snapshot.status == "blocked"
+    assert result.snapshot.evidence[0].source == "navigation"
+
+
+MASKED_PRICE_PAGE = """<!doctype html><html><head><title>合成打码价格商品</title></head><body>
+<h1 class="sku-name">合成打码价格商品</h1><div id="sellerName">合成测试店</div>
+<div id="summary-price">¥4??9 登录查看价格</div>
+<div id="parameter"><ul><li>品牌：合成品牌</li><li>线缆长度：10米</li></ul></div>
+<div id="choose-attrs"><div class="selected">10米 扁平 超六类</div></div>
+<div id="detail"></div></body></html>"""
+
+COMPLETE_PRICE_PAGE = """<!doctype html><html><head><title>合成完整价格商品</title></head><body>
+<h1 class="sku-name">合成完整价格商品</h1><div id="sellerName">合成测试店</div>
+<div id="summary-price">优惠前 ￥52.37</div>
+<div id="parameter"><ul><li>品牌：合成品牌</li><li>线缆长度：15米</li></ul></div>
+<div id="choose-attrs"><div class="selected">15米 扁平 超六类</div></div>
+<div id="detail"></div></body></html>"""
+
+
+def test_masked_price_is_never_reported_as_a_partial_amount(tmp_path):
+    """JD serves "¥4??9" to signed-out visitors; the leading digit is not a price."""
+    snapshot = (
+        collector(tmp_path, MASKED_PRICE_PAGE).collect("https://item.jd.com/100001.html").snapshot
+    )
+    masked = [price for price in snapshot.prices if price.amount is None]
+    assert masked, "打码价格必须保留原始文字但不给出金额"
+    assert all(price.amount is None for price in snapshot.prices), "部分数字不得被当成金额"
+    assert all(price.status == "ambiguous" for price in snapshot.prices)
+    assert any(
+        "登录" in (entry.note or "") for entry in snapshot.coverage if "price" in entry.field_path
+    )
+
+
+def test_complete_price_still_parses_after_masked_price_guard(tmp_path):
+    snapshot = (
+        collector(tmp_path, COMPLETE_PRICE_PAGE).collect("https://item.jd.com/100001.html").snapshot
+    )
+    amounts = [str(price.amount) for price in snapshot.prices if price.amount is not None]
+    assert "52.37" in amounts
+    assert all(price.status == "observed" for price in snapshot.prices)

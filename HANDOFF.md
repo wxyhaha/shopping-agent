@@ -1,6 +1,61 @@
 # 最近一次交接
 
-## 最新检查点：Windows 真实运行达标、文档与代码债收口（2026-10-31）
+## 最新检查点：京东价格视觉读取与规格展开（2026-11-01）
+
+用户要求先做 B（规格采集）、再做 A（详情图识别）。本轮完成 B 的实现与大部分验证，A 未开始。收口时按下述状态提交，**B 的扩展通道仍不稳定**。
+
+### 已修复的缺陷（均有真实证据）
+
+1. **打码价被读成数字**：京东未登录时价格原文是 `¥4??9`，`PRICE_PATTERN` 只取到前导数字，`amount=4`、`status=observed`。这会直接污染比价。现按“打码/字体混淆一律 `amount=null` + `ambiguous`”处理，附说明文案。扩展 `adapter_version` 升至 `0.3.0` 以区分新旧行为。
+2. **扩展采到推荐商品价格**：`.price` 选择器过宽，一次采到 8 条推荐位价格并当成主价格。现按 `RECOMMENDATION_CONTEXTS` 排除推荐/榜单容器，并限制最多 3 条，实测 8 条 → 1 条。
+3. **`"m.jd.com" in "item.jd.com"` 子串误判**：导致所有京东 PC 链接被改写成移动版，连带 2 个搜索测试失败。改为精确 host 比较。
+4. **视觉开关在子进程失效**：`price_vision_enabled` 未传入采集子进程。
+5. **价格截图选中隐藏节点**：`query_selector` 取首个匹配，而首个不可见，截图失败。新增 `visible_price_element` 只取可见节点。
+6. **`observed` 覆盖缺证据触发校验失败**：视觉回填的 `price.render` 覆盖未带证据引用，`ValidationError` 使整个采集报 `browser_error`。
+7. **登录窗口静默失败**：窗口落在风控页却报 `awaiting_user`。新增 `entry_note`，只上报固定文案、不回传页面正文（有测试覆盖）。
+8. **京东登录窗口开在受拦的商品页**：改为打开京东首页（`login_entry_url`），用户才能正常登录。
+
+### 价格视觉读取（已打通）
+
+京东已登录时价格用自定义字体 `JDZH-Regular-Price` 渲染，DOM 里是私有区字符（`\uf261\uf4d5…`），文本解析无法还原。**未解析字体映射**（属规避反爬），改为读取浏览器实际绘制结果。架构按“子进程无密钥、父进程读图”拆开：子进程只截图并回传 base64，父进程持模型配置完成识别，识别结果必须是单一价格形状，否则保持 `ambiguous`。
+
+真实证据：截图 → `4299.00`；后台登录会话采集得到 `amount=4299.00`、`status=observed`，`price.render` 覆盖带证据引用。
+
+### 规格展开（逻辑已验证，通道不稳定）
+
+京东移动版“规格参数”需点击才渲染；未登录时页面根本没有该标签。真实浏览器点击后解析器采到 **23 项**（机型、屏幕、存储、电池、尺寸、重量、颜色等），已验证。前端新增 `spec-panel.ts`：只点非链接、可见、非标题的标签，点击后校验正文变长才认成功；桥接层 `capture` 改为支持异步；研究补采集与手动加商品两处接入（预览不触发点击）。
+
+**关键限制**：后台 Playwright 环境中 `navigator.webdriver=true`，京东不渲染参数表（headed 模式同样）。因此规格只能走扩展通道，已在系统提示与工具描述中写明。
+
+### 仍未解决
+
+- 扩展在日常 Edge 中**时好时坏**：能连接、有心跳、偶尔领取请求，但多数时候领取后处理失败或不提交，`BrowserCaptureJob` 出现 `attempts=2` 且 `expired`。已排除代码逻辑（同版本曾成功 2 次并落库 `jd-dom` 快照）、权限、后端 job 机制（模拟 client 可领到）。怀疑京东登录后页面结构与展开动作使 `capture` 抛错，而 `capture-bridge` 的 catch 吞掉了具体原因。
+- Edge 156 与 Chrome 156 均禁用 `--load-extension`，扩展必须手动在扩展管理页加载；解压加载后“重新加载”不保证刷新内容脚本，需移除后重新加载或刷新页面。
+
+### 检查
+
+- 后端全套 **131 项通过、1 项跳过**（需可见桌面），新增 23 项（`test_price_vision.py` 19 项、`test_price_vision_pipeline.py` 4 项）。
+- 扩展通道 9 项通过（桥接 6 + 规格标签 3）；前端 typecheck、Ruff、格式检查通过。
+- 未完成：扩展稳定采集、A 方案详情图识别、多品类验证。
+
+### 下一动作
+
+1. 给 `capture-bridge` / 内容脚本加可观测的失败原因（当前被 catch 吞掉），定位领取后失败的真实异常。
+2. 扩展通道稳定后补一次登录态完整验收（价格字体混淆 + 规格 23 项）。
+3. 再做 A：详情图识别，复用已通的“截图 + 视觉”基础设施。
+
+## 此前检查点：京东风控受阻可见性（2026-10-31）
+
+- 用户选择的下一个开发方向：“先做京东访问受阻的可见处理”。本轮只做这一项，未改采集能力本身，未尝试绕过风控。
+- 实测基线：真实 `item.jd.com` 被拦到 `pc-frequent-pro.pf.jd.com/?from=pc_item&reason=403`，**HTTP 200**（不是 403），正文“暂时无法展示该商品的信息”。换桌面 UA 并隐藏 `navigator.webdriver` 后仍拦截，说明不是无头特征导致；按规范不绕过。
+- 两个叠加缺陷：① 风控被 `navigation_destination` 判成 `redirected`（“页面没停在原商品”），误导用户与模型；② 页面加载后的二次导航让 `page.evaluate` 抛 `Execution context was destroyed`，异常未捕获，真实结果被报成 `worker_failed`（“进程异常，可重试或接管”），把平台拦截伪装成程序故障。
+- 改动：`background_collector.py` 新增 `reading_signals`（最多 3 次重试）、`interstitial_host`、`risk_control` 判定（**正文标记优先，其次最终主机**）、`access_message`，并让 `unavailable_snapshot` 记录最终主机与 HTTP 状态（旧调用式兼容）。`research_agent.py` 为受阻结果补 `access_code`，风控时给出“不是登录问题”的专用说明，并在系统提示中说明 `risk_control` 语义。前端 `App.tsx` 快照卡新增受阻 Alert；`ResearchPanel.tsx` 从 `access_code` 拆出风控与登录两类，风控不再显示登录窗口按钮。
+- 真实证据：修复后同一链接 `error_code=risk_control`，证据“暂时无法展示该商品的信息（最终主机 pc-frequent-pro.pf.jd.com）（HTTP 200）”。真实研究 `1d7282a3`（任务 `e2c8487c`）completed、约 37 秒、9 条事件，报告 `needs_evidence`，正文明确“属于平台风控限制而非登录状态失效”。工作台真实渲染该任务页含风控文案、无“登录窗口”，控制台错误与失败请求为 0。
+- 检查：后台全套 104 项通过、1 项因无可见桌面跳过；新增 3 项回归（风控不得误报 redirected／证据保留主机与状态／加载后导航仍得 risk_control）。Ruff、格式、前端 typecheck 通过。天猫登录态链接同批复测仍正常 `partial`，未削弱既有通道。
+- 边界：`risk_control` 只代表本次访问被拦截；京东真实商品字段覆盖仍未取得，双平台采集验收、多品类单位价、扩展在 Windows 的实际加载仍待完成。快照仍全部来自 `tmall`。
+- 下一动作：优先京东采集的真实获取路径（登录态或扩展接管下的实页字段覆盖），再补多品类验证；快照平台分布应从“全部 tmall”变为有真实 `jd` 样本。
+
+## 此前检查点：Windows 真实运行达标、文档与代码债收口（2026-10-31）
 
 - 用户要求处理六项文档更新与三项代码债，并明确“下次用 DeepTutor 学习时要去哪里更新源码”。本轮全部完成，另补充测试与事件标签改动。
 - Windows 实机新证据：`.env` 已配置（仅变量名记录，`git check-ignore` 确认为 `.gitignore:12`）；数据从 `.runtime\restored-data\` 落到默认目录 `%LOCALAPPDATA%\shopping-agent`，启动不再需要 `SHOPPING_AGENT_DATA_DIR`。网关 `/models` 200（3.42 秒），真实工具调用 6.69 秒。

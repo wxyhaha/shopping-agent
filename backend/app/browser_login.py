@@ -14,11 +14,34 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
-from app.background_collector import product_navigation_url, session_name
+from app.background_collector import login_entry_url, session_name
 from app.capture_urls import product_url_identity
 from app.config import Settings
 
 ACTIVE = {"opening", "awaiting_user", "saving"}
+
+# Static wording a platform shows instead of the page the user expects. Only these fixed
+# markers are reported; page text is never forwarded, so no account data can leak.
+INTERSTITIAL_MARKERS = (
+    ("当前页面异常", "平台返回“当前页面异常”，需要刷新或更换网络后再试。"),
+    ("暂时无法展示该商品的信息", "平台风控拦截了页面，未展示商品内容。"),
+    ("安全验证", "页面要求先完成安全验证。"),
+    ("滑动验证", "页面要求先完成滑动验证。"),
+)
+
+
+def read_entry_note(page) -> str | None:
+    """Explain an interstitial the visible window landed on, without echoing its text."""
+    try:
+        text = page.inner_text("body")
+    except Exception:  # A driver error here must never end the user's login window.
+        return None
+    if not isinstance(text, str):
+        return None
+    for marker, note in INTERSTITIAL_MARKERS:
+        if marker in text:
+            return note
+    return None
 
 
 def save_private_state(context, path: Path, platform: str):
@@ -92,6 +115,7 @@ class BrowserLoginManager:
                 "platform": session_name(identity.platform),
                 "status": "opening",
                 "error": None,
+                "entry_note": None,
             }
             self.commands = queue.Queue()
             self.done = threading.Event()
@@ -139,7 +163,7 @@ class BrowserLoginManager:
                     page = context.new_page()
                     try:
                         page.goto(
-                            product_navigation_url(identity, url),
+                            login_entry_url(identity, url),
                             wait_until="domcontentloaded",
                             timeout=20000,
                         )
@@ -148,6 +172,7 @@ class BrowserLoginManager:
                     with self.lock:
                         if self.state["status"] != "cancelled":
                             self._set("awaiting_user")
+                            self.state["entry_note"] = read_entry_note(page)
                     deadline = time.monotonic() + self.ttl_seconds
                     while time.monotonic() < deadline and not self.closing:
                         try:

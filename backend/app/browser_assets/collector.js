@@ -191,51 +191,76 @@ var ShoppingAgentCollector = (function(exports) {
 			title: [
 				"#name h1",
 				".sku-name",
+				"[class*='skuName']",
 				"h1"
 			],
 			brand: [
 				"#parameter",
 				".p-parameter",
-				"[class*='parameter']"
+				"[class*='parameter']",
+				"[class*='brand']"
 			],
 			seller: [
 				"#sellerName",
 				".shop-name",
-				"[class*='seller']"
+				"[class*='seller']",
+				"[class*='shopName']"
 			],
 			price: [
 				"#summary-price",
 				".summary-price",
 				"[itemprop='price']",
+				".price_wrap",
+				".price",
 				"[class*='price']"
 			],
 			sku: [
 				"#choose-attrs",
 				"#choose",
 				".itemInfo-wrap",
+				".sku_choose_info",
+				".sku_window",
+				".sku_info",
 				"[class*='sku']"
 			],
 			specifications: [
 				"#parameter",
 				".p-parameter",
 				"[class*='parameter']",
-				"[class*='attributes']"
+				"[class*='attributes']",
+				"[class*='spec']",
+				"[class*='param']"
 			],
 			gallery: [
 				"#spec-list",
 				"#preview",
-				"[class*='gallery']"
+				"[class*='gallery']",
+				"[class*='banner']"
 			],
 			details: [
 				"#detail",
 				"#detailContent",
 				"[class*='detail-content']",
-				"[class*='description']"
+				"[class*='description']",
+				"[class*='detail']"
 			]
 		}
 	};
 	var SENSITIVE_OR_IRRELEVANT_LABEL = /地址|收货|送至|配送|联系人|收件人|手机号|电话|运费|购买数量|数量|店铺活动|用户评价|问大家/i;
 	var PRICE_PATTERN = /(?:￥|¥|CNY\s*)\s*([0-9][0-9,]*(?:\.\d{1,4})?)/i;
+	var FONT_OBFUSCATED_PRICE = /[¥￥]\s*[\uE000-\uF8FF][\uE000-\uF8FF0-9.,]*/;
+	var RECOMMENDATION_CONTEXTS = [
+		"[class*='recommend' i]",
+		"[class*='Recommend']",
+		"[class*='guess' i]",
+		"[class*='similar' i]",
+		"[class*='hot_sale' i]",
+		"[class*='product_floor']",
+		"[class*='goods_floor']",
+		"[class*='rank' i]",
+		".mod_inspectyoupin",
+		".mod_recommend"
+	].join(",");
 	var PRODUCT_SPEC_LABELS = /* @__PURE__ */ new Set([
 		"品牌",
 		"型号",
@@ -669,15 +694,20 @@ var ShoppingAgentCollector = (function(exports) {
 		for (const selector of selectors.price) {
 			for (const element of document.querySelectorAll(selector)) {
 				if (!isVisible(element)) continue;
+				if (element.closest(RECOMMENDATION_CONTEXTS)) continue;
 				const raw = cleanText(element.textContent, 160);
-				if (!PRICE_PATTERN.test(raw) || raw.length > 160 || priceTexts.has(raw)) continue;
+				if (!(PRICE_PATTERN.test(raw) || FONT_OBFUSCATED_PRICE.test(raw)) || raw.length > 160 || priceTexts.has(raw)) continue;
 				priceTexts.add(raw);
+				if (priceTexts.size >= 3) break;
 			}
 			if (priceTexts.size > 0) break;
 		}
 		for (const [index, rawText] of [...priceTexts].slice(0, 8).entries()) {
 			const evidenceId = addEvidence(`prices[${index}]`, "visible_dom", rawText, selectors.price.join(", "));
-			const amount = PRICE_PATTERN.exec(rawText)?.[1]?.replace(/,/g, "") ?? null;
+			const literal = PRICE_PATTERN.exec(rawText)?.[1]?.replace(/,/g, "") ?? null;
+			const masked = /[¥￥]\s*[0-9][0-9,]*(?:\.\d{1,4})?\s*[?？*]/.test(rawText) || /[¥￥]\s*[?？*]/.test(rawText);
+			const fontObfuscated = FONT_OBFUSCATED_PRICE.test(rawText);
+			const amount = masked || fontObfuscated ? null : literal;
 			const kind = /会员|88VIP/i.test(rawText) ? "member" : /券后|优惠券/i.test(rawText) ? "coupon" : /优惠前|划线价|原价/i.test(rawText) ? "list" : "unknown";
 			prices.push({
 				observation_id: `o${String(fields.length + index + 1).padStart(3, "0")}`,
@@ -685,16 +715,18 @@ var ShoppingAgentCollector = (function(exports) {
 				raw_text: rawText,
 				amount,
 				currency: /￥|¥|CNY/i.test(rawText) ? "CNY" : void 0,
-				status: "observed",
+				status: masked || fontObfuscated ? "ambiguous" : "observed",
 				conditions: [],
 				evidence_ids: [evidenceId]
 			});
 		}
 		const priceEvidence = evidence.filter((entry) => entry.field_path.startsWith("prices[")).map((entry) => entry.evidence_id);
+		const maskedPrice = prices.some((price) => price.status === "ambiguous");
+		const obfuscatedPrice = prices.some((price) => FONT_OBFUSCATED_PRICE.test(price.raw_text ?? ""));
 		coverage.push({
 			field_path: "price",
-			status: prices.length ? "observed" : "missing",
-			note: prices.length ? "仅记录页面可见价格文字；不推断券后或最终支付价。" : "未找到可核对的价格文字。",
+			status: prices.length ? maskedPrice ? "ambiguous" : "observed" : "missing",
+			note: prices.length ? obfuscatedPrice ? "价格数字以自定义字体渲染，页面文字不含可读数字；金额需从实际显示读取。" : maskedPrice ? "页面价格包含被平台遮挡的数字，无法确认真实金额；不以部分数字推算。通常需要登录后才有完整价格。" : "仅记录页面可见价格文字；不推断券后或最终支付价。" : "未找到可核对的价格文字。",
 			evidence_ids: priceEvidence
 		});
 		function collectImages(kind, candidates) {

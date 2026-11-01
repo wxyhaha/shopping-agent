@@ -49,19 +49,53 @@ const SELECTORS: Record<Platform, AdapterSelectors> = {
     details: ["#J_DivItemDesc", "#description", "#detailContent", "[class*='detail-content']", "[class*='detailContent']", ".page-content-area"],
   },
   jd: {
-    title: ["#name h1", ".sku-name", "h1"],
-    brand: ["#parameter", ".p-parameter", "[class*='parameter']"],
-    seller: ["#sellerName", ".shop-name", "[class*='seller']"],
-    price: ["#summary-price", ".summary-price", "[itemprop='price']", "[class*='price']"],
-    sku: ["#choose-attrs", "#choose", ".itemInfo-wrap", "[class*='sku']"],
-    specifications: ["#parameter", ".p-parameter", "[class*='parameter']", "[class*='attributes']"],
-    gallery: ["#spec-list", "#preview", "[class*='gallery']"],
-    details: ["#detail", "#detailContent", "[class*='detail-content']", "[class*='description']"],
+    // JD's PC item host answers with a risk-control page, so collection uses the mobile
+    // host (item.m.jd.com). Both layouts are listed: the mobile DOM uses different
+    // container names and its price element is a bare ".price".
+    title: ["#name h1", ".sku-name", "[class*='skuName']", "h1"],
+    brand: ["#parameter", ".p-parameter", "[class*='parameter']", "[class*='brand']"],
+    seller: ["#sellerName", ".shop-name", "[class*='seller']", "[class*='shopName']"],
+    price: [
+      "#summary-price", ".summary-price", "[itemprop='price']",
+      ".price_wrap", ".price", "[class*='price']",
+    ],
+    sku: [
+      "#choose-attrs", "#choose", ".itemInfo-wrap",
+      ".sku_choose_info", ".sku_window", ".sku_info", "[class*='sku']",
+    ],
+    specifications: [
+      "#parameter", ".p-parameter", "[class*='parameter']",
+      "[class*='attributes']", "[class*='spec']", "[class*='param']",
+    ],
+    gallery: ["#spec-list", "#preview", "[class*='gallery']", "[class*='banner']"],
+    details: [
+      "#detail", "#detailContent", "[class*='detail-content']",
+      "[class*='description']", "[class*='detail']",
+    ],
   },
 };
 
 const SENSITIVE_OR_IRRELEVANT_LABEL = /地址|收货|送至|配送|联系人|收件人|手机号|电话|运费|购买数量|数量|店铺活动|用户评价|问大家/i;
 const PRICE_PATTERN = /(?:￥|¥|CNY\s*)\s*([0-9][0-9,]*(?:\.\d{1,4})?)/i;
+// A price can be painted through a custom font, leaving private-use code points where the
+// digits are. Such text is still a price observation worth keeping: the amount is unknown
+// from the DOM, but the raw text is what a later rendered-price read refers to.
+const FONT_OBFUSCATED_PRICE = /[¥￥]\s*[\uE000-\uF8FF][\uE000-\uF8FF0-9.,]*/;
+// Containers that list other products. Their prices are not this product's price and must
+// never be recorded as one, or a comparison would silently use an unrelated amount.
+// "priceFloor" holds the real price, so floor matching is restricted to product floors.
+const RECOMMENDATION_CONTEXTS = [
+  "[class*='recommend' i]",
+  "[class*='Recommend']",
+  "[class*='guess' i]",
+  "[class*='similar' i]",
+  "[class*='hot_sale' i]",
+  "[class*='product_floor']",
+  "[class*='goods_floor']",
+  "[class*='rank' i]",
+  ".mod_inspectyoupin",
+  ".mod_recommend",
+].join(",");
 const PRODUCT_SPEC_LABELS = new Set([
   "品牌", "型号", "商品名称", "产品名称", "网线种类", "性能等级", "屏蔽结构", "使用环境",
   "绝缘材质", "护套材质", "连接设备", "线芯材质", "颜色分类", "长度", "接口类型", "适用设备",
@@ -421,19 +455,32 @@ export function collectCurrentProductSnapshot(
   coverage.push({ field_path: "selected_variant", status: variant.status, note: variant.status === "observed" ? undefined : "未能从页面选中状态确认完整规格，SKU 标识不能代替规格文案。", evidence_ids: variant.evidence_ids ?? [] });
 
   const priceTexts = new Set<string>();
+  // Only the first selector that yields text is used, and a page can repeat the same
+  // amount many times, so keep a small set rather than every recommended item's price.
   for (const selector of selectors.price) {
     for (const element of document.querySelectorAll(selector)) {
       if (!isVisible(element)) continue;
+      // A recommendation carousel also exposes price classes; its container is excluded.
+      if (element.closest(RECOMMENDATION_CONTEXTS)) continue;
       const raw = cleanText(element.textContent, 160);
-      if (!PRICE_PATTERN.test(raw) || raw.length > 160 || priceTexts.has(raw)) continue;
+      const isPrice = PRICE_PATTERN.test(raw) || FONT_OBFUSCATED_PRICE.test(raw);
+      if (!isPrice || raw.length > 160 || priceTexts.has(raw)) continue;
       priceTexts.add(raw);
+      if (priceTexts.size >= 3) break;
     }
     if (priceTexts.size > 0) break;
   }
   for (const [index, rawText] of [...priceTexts].slice(0, 8).entries()) {
     const fieldPath = `prices[${index}]`;
     const evidenceId = addEvidence(fieldPath, "visible_dom", rawText, selectors.price.join(", "));
-    const amount = PRICE_PATTERN.exec(rawText)?.[1]?.replace(/,/g, "") ?? null;
+    // A marketplace can mask digits (JD serves "¥4??9" to signed-out visitors). Only a
+    // contiguous numeral is a whole amount; otherwise "4" would be read as 4 yuan.
+    const literal = PRICE_PATTERN.exec(rawText)?.[1]?.replace(/,/g, "") ?? null;
+    const masked = /[¥￥]\s*[0-9][0-9,]*(?:\.\d{1,4})?\s*[?？*]/.test(rawText) ||
+      /[¥￥]\s*[?？*]/.test(rawText);
+    // Digits drawn by a custom font carry no readable numeral, so the amount stays null.
+    const fontObfuscated = FONT_OBFUSCATED_PRICE.test(rawText);
+    const amount = masked || fontObfuscated ? null : literal;
     const kind: PriceObservationInput["kind"] = /会员|88VIP/i.test(rawText)
       ? "member"
       : /券后|优惠券/i.test(rawText)
@@ -447,13 +494,22 @@ export function collectCurrentProductSnapshot(
       raw_text: rawText,
       amount,
       currency: /￥|¥|CNY/i.test(rawText) ? "CNY" : undefined,
-      status: "observed",
+      status: masked || fontObfuscated ? "ambiguous" : "observed",
       conditions: [],
       evidence_ids: [evidenceId],
     });
   }
   const priceEvidence = evidence.filter((entry) => entry.field_path.startsWith("prices[")).map((entry) => entry.evidence_id);
-  coverage.push({ field_path: "price", status: prices.length ? "observed" : "missing", note: prices.length ? "仅记录页面可见价格文字；不推断券后或最终支付价。" : "未找到可核对的价格文字。", evidence_ids: priceEvidence });
+  const maskedPrice = prices.some((price) => price.status === "ambiguous");
+  const obfuscatedPrice = prices.some((price) => FONT_OBFUSCATED_PRICE.test(price.raw_text ?? ""));
+  coverage.push({ field_path: "price", status: prices.length ? (maskedPrice ? "ambiguous" : "observed") : "missing",
+    note: prices.length
+      ? (obfuscatedPrice
+        ? "价格数字以自定义字体渲染，页面文字不含可读数字；金额需从实际显示读取。"
+        : maskedPrice
+          ? "页面价格包含被平台遮挡的数字，无法确认真实金额；不以部分数字推算。通常需要登录后才有完整价格。"
+          : "仅记录页面可见价格文字；不推断券后或最终支付价。")
+      : "未找到可核对的价格文字。", evidence_ids: priceEvidence });
 
   function collectImages(kind: "gallery" | "detail", candidates: string[]): void {
     const container = candidates.map((selector) => document.querySelector(selector)).find((candidate) => candidate && isVisible(candidate));
@@ -519,7 +575,9 @@ export function collectCurrentProductSnapshot(
   return {
     schema_version: 1,
     adapter_id: `${platform}-dom`,
-    adapter_version: "0.2.0",
+    // Bumped whenever the parsing rules change, so a stored snapshot shows which rules
+    // produced it. A masked price read as a number can only be traced this way.
+    adapter_version: "0.3.0",
     page_url: pageUrl,
     canonical_url: canonicalUrl,
     captured_at: new Date().toISOString(),

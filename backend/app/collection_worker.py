@@ -45,6 +45,9 @@ def main():
         "snapshot": result.snapshot.model_dump(mode="json") if result.snapshot else None,
         "error_code": result.error_code,
         "message": result.message,
+        # The parent reads a font-obfuscated price from these pixels; this process never
+        # holds model credentials, so it must not attempt the recognition itself.
+        "price_screenshot_png": result.price_screenshot_png,
     }
     path = Path(payload["output_path"])
     path.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")
