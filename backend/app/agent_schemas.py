@@ -27,6 +27,12 @@ class ReadEvidenceArgs(StrictModel):
     item_id: str = Field(min_length=1, max_length=36)
 
 
+class SearchEvidenceArgs(ReadEvidenceArgs):
+    query: str = Field(min_length=1, max_length=80)
+    kind: Literal["parameter", "claim", "policy"] | None = None
+    limit: int = Field(default=12, ge=1, le=20)
+
+
 class CaptureProductPageArgs(ReadEvidenceArgs):
     reason: str = Field(min_length=2, max_length=800)
 

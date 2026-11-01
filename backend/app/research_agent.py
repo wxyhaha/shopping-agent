@@ -24,12 +24,14 @@ from app.agent_schemas import (
     CaptureProductPageArgs,
     ReadEvidenceArgs,
     ResearchReport,
+    SearchEvidenceArgs,
     SelectProductVariantArgs,
     SubmitResearchReport,
 )
 from app.background_collector import BackgroundCollector
 from app.browser_capture import TERMINAL, aware, cancel_capture_jobs, create_capture_job
 from app.config import get_settings
+from app.evidence_search import detail_research_summary, search_detail_evidence
 from app.models import AgentRun, BrowserCaptureJob, CaptureSnapshot, ProductItem, Task, utc_now
 from app.price_comparison import calculate_price_comparisons
 from app.product_search import ProductSearch
@@ -95,6 +97,8 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 可作为商品特征说明；detail_images.claim_* 是评价、比较、荣誉、代言、口号或认证名称，
 只能作为商家说法提及；detail_images.policy_* 是售后、配送、优惠或购买限制，写入购买条件一节。
 引用详情图内容时标注"详情图"来源，不要把它与 DOM 中的结构化规格等同。
+详情图的参数与购买条件会完整给出，宣传类内容只给数量与示例；需要某条宣传原文或核对某个
+属性时，用 search_product_evidence 按关键词检索，不要为此重新读取整份快照。
 后台返回 blocked/failed 表示访问受阻或失败，不是商品规格证据；不要仅凭标题给出确定推荐。
 error_code 为 risk_control 表示平台风控拦截，不是登录或验证问题，建议重新登录无效；
 此时应建议稍后重试或改用扩展接管，不要声称用户登录后即可访问。
@@ -167,8 +171,15 @@ TOOLS = [
     ),
     tool_schema(
         "read_product_evidence",
-        "读取任务内某商品最新快照及字段证据，可在用户重采集后再次读取。",
+        "读取任务内某商品最新快照、规格目录与价格。详情图的参数与购买条件会完整给出，"
+        "宣传类内容只给数量与示例；需要某条宣传或某个参数原文时再用 search_product_evidence 查。",
         ReadEvidenceArgs,
+    ),
+    tool_schema(
+        "search_product_evidence",
+        "在已读取商品的详情图文本中按关键词检索，返回命中的原文与证据引用。"
+        "用于核对某个参数、材质、屏蔽结构或某条宣传/售后条款，避免重复读取整份快照。",
+        SearchEvidenceArgs,
     ),
     tool_schema(
         "capture_product_page",
@@ -184,6 +195,75 @@ TOOLS = [
         SubmitResearchReport,
     ),
 ]
+
+
+PRICE_OBSERVATION_LIMITS = {
+    "price_label": "只能按原文表述；优惠前不表示起售价、最低价或到手价。",
+    "variant_price_binding": "未识别选中规格时，价格是否对应目标规格仍未知。",
+    "missing_fields": "采集缺失不证明页面没有该字段或用户未选择规格。",
+}
+
+
+def compact_detail_fields(fields: list[dict], limit: int = 40, ref_prefix: str = "") -> dict:
+    """Return ordinary fields plus a decision-sized view of detail-image findings.
+
+    Every attribute statement and purchase condition is retained, together with its evidence
+    references. Only promotional lines are summarised, because reading all of them on each
+    tool call is what makes the request grow with every product read.
+    """
+    detail_fields: list[dict] = []
+    other: list[dict] = []
+    for field in fields:
+        path = str(field.get("field_path") or "")
+        if path.startswith("detail_images."):
+            detail_fields.append(field)
+            continue
+        other.append(field)
+    result: dict[str, object] = {"fields": other[:limit]}
+    result.update(detail_research_summary(detail_fields, ref_prefix=ref_prefix))
+    return result
+
+
+def compact_coverage(entries: list[dict]) -> list[dict]:
+    """Drop the per-image detail coverage rows, which repeat one sentence each.
+
+    Both spellings occur in stored snapshots (``detail_images[<i>].text`` from the vision
+    pass and ``images.detail[<i>].text`` from the parser), and each row only restates that a
+    panel was read — dozens of them add no information.
+    """
+    per_image_prefixes = ("detail_images[", "images.detail[")
+    return [
+        entry
+        for entry in entries
+        if not str(entry.get("field_path") or "").startswith(per_image_prefixes)
+    ]
+
+
+def compact_evidence(entries: list[dict]) -> list[dict]:
+    """Drop evidence whose content the model does not need in order to reason.
+
+    Two kinds dominate a page with ~30 detail panels and both are redundant here:
+
+    * ``image_metadata`` — one record per image with its URL and pixel size. A gallery of 39
+      images produced 10k characters that say nothing about what the product is.
+    * the ``excerpt`` on ``detail_image_vision`` — the same text already appears in
+      ``detail_parameters``/``detail_claims``/``detail_policies``.
+
+    Everything else keeps its excerpt, so ordinary field citations stay checkable. The
+    detail entries also keep their locator, so a claim can still be traced to its panel.
+    """
+    compacted: list[dict] = []
+    for entry in entries:
+        source = entry.get("source")
+        if source == "image_metadata":
+            continue
+        if source == "detail_image_vision":
+            trimmed = dict(entry)
+            trimmed.pop("excerpt", None)
+            compacted.append(trimmed)
+            continue
+        compacted.append(entry)
+    return compacted
 
 
 class AgentState(TypedDict):
@@ -402,10 +482,16 @@ class ResearchRuntime(SearchRuntimeMixin):
                     "note": "没有可用快照。优先使用 collect_product_page 后台打开商品链接采集。",
                 }, {}
             payload = snapshot.payload
+            # Evidence is what the report cites, but a page with ~30 detail panels produces
+            # ~90 entries whose excerpts restate text already listed under
+            # detail_parameters/claims/policies. Only the per-image vision entries are
+            # trimmed to a locator; every other source keeps its excerpt intact so ordinary
+            # field references remain checkable.
             evidence = [
                 {**entry, "ref": f"{snapshot.id}:{entry['evidence_id']}"}
                 for entry in payload.get("evidence", [])[:500]
             ]
+            evidence = compact_evidence(evidence)
             refs = {
                 entry["ref"]: {
                     "snapshot_id": snapshot.id,
@@ -422,20 +508,114 @@ class ResearchRuntime(SearchRuntimeMixin):
                 "snapshot_id": snapshot.id,
                 "status": snapshot.status,
                 "captured_at": snapshot.captured_at.isoformat(),
-                "fields": payload.get("fields", [])[:60],
+                # Detail-image findings carry almost the whole payload once a page has ~30
+                # panels. Repeated bookkeeping is folded away, while attribute statements
+                # and transaction terms stay complete. Promotional lines become a count plus
+                # examples: they are seller presentation, not comparison evidence.
+                **compact_detail_fields(payload.get("fields", []), ref_prefix=f"{snapshot.id}:"),
                 "selected_variant": payload.get("selected_variant"),
                 "variant_catalog": payload.get("variant_catalog"),
                 "variant_verification": payload.get("variant_verification"),
                 "prices": payload.get("prices", [])[:8],
-                "observation_limits": {
-                    "price_label": "只能按原文表述；优惠前不表示起售价、最低价或到手价。",
-                    "variant_price_binding": "未识别选中规格时，价格是否对应目标规格仍未知。",
-                    "missing_fields": "采集缺失不证明页面没有该字段或用户未选择规格。",
-                },
-                "coverage": payload.get("coverage", []),
+                "observation_limits": PRICE_OBSERVATION_LIMITS,
+                "coverage": compact_coverage(payload.get("coverage", [])),
                 "evidence": evidence,
                 "image_note": "图片内容未读取；图片来源和尺寸不能证明图片中的规格。",
             }, refs
+
+    def _latest_snapshot(self, task_id: str, item_id: str) -> CaptureSnapshot | None:
+        with self.sessions() as session:
+            item = session.get(ProductItem, item_id)
+            if not item or item.task_id != task_id:
+                return None
+            return session.scalar(
+                select(CaptureSnapshot)
+                .where(CaptureSnapshot.item_id == item_id)
+                .order_by(CaptureSnapshot.received_at.desc())
+                .limit(1)
+            )
+
+    def _repeat_read(
+        self, task_id: str, item_id: str, expected_snapshot_id: str
+    ) -> tuple[dict, dict]:
+        """Confirm an unchanged snapshot without repeating its whole content.
+
+        The earlier read is still in the transcript. Resending it doubled the request size for
+        multi-product runs and pushed a model call past its timeout, so a repeat only reports
+        that nothing changed, keeps the current price, and points at the search tool for
+        specific lines.
+        """
+        snapshot = self._latest_snapshot(task_id, item_id)
+        if snapshot is None:
+            return {"error": "商品不属于此任务。"}, {}
+        base = {
+            "item_id": item_id,
+            "snapshot_id": snapshot.id,
+            "status": snapshot.status,
+            "captured_at": snapshot.captured_at.isoformat(),
+            "freshness": "same_snapshot",
+            "retrieval_note": "仍是上次读取的同一份快照；没有重新访问商品页或新增证据。",
+            "prices": snapshot.payload.get("prices", [])[:8],
+            # The price caveats are tiny and must survive a repeat read: without them a later
+            # turn can report the label as a final price.
+            "observation_limits": PRICE_OBSERVATION_LIMITS,
+        }
+        if snapshot.id == expected_snapshot_id:
+            base["note"] = (
+                "内容与本次研究已读取的相同，未重复返回。"
+                "如需某条详情图原文（参数、宣传或购买条件），用 search_product_evidence 检索。"
+            )
+        else:
+            base["note"] = "快照已更新，请重新读取以获取新内容。"
+        return base, {}
+
+    def _search_evidence(
+        self, task_id: str, item_id: str, query: str, kind: str | None, limit: int
+    ) -> tuple[dict, dict]:
+        """Return matching detail-image lines for one item, with citations intact."""
+        snapshot = self._latest_snapshot(task_id, item_id)
+        if snapshot is None:
+            return {"error": "商品不属于此任务，或还没有可用快照。"}, {}
+        prefix = f"{snapshot.id}:"
+        matches = search_detail_evidence(
+            snapshot.payload.get("fields", []),
+            query,
+            kind=kind,
+            limit=limit,
+            ref_prefix=prefix,
+        )
+        # Every detail line carries the same evidence set, so repeat it once instead of on each
+        # match. The references stay citable either way.
+        shared: list[str] = []
+        if matches and len({tuple(match["refs"]) for match in matches}) == 1:
+            shared = matches[0]["refs"]
+            matches = [{"text": match["text"], "kind": match["kind"]} for match in matches]
+        refs: dict[str, dict] = {
+            ref: {
+                "snapshot_id": snapshot.id,
+                "item_id": item_id,
+                "source": "detail_image_vision",
+                "field_path": "detail_images",
+                "capture_status": snapshot.status,
+            }
+            for ref in shared
+        }
+        result = {
+            "item_id": item_id,
+            "snapshot_id": snapshot.id,
+            "query": query,
+            "kind": kind,
+            "count": len(matches),
+            "matches": matches,
+            "note": (
+                "命中项来自详情图，属商家标注。"
+                if matches
+                else "详情图文本中没有匹配项；这不证明页面没有相关说明。"
+            ),
+        }
+        if shared:
+            result["detail_refs"] = shared
+        return result, refs
 
     def _calculate_prices(
         self, task_id: str, item_ids: list[str], read_snapshots: dict[str, str]
@@ -847,23 +1027,39 @@ class ResearchRuntime(SearchRuntimeMixin):
                         price_comparisons = []
                 elif name == "read_product_evidence":
                     payload = ReadEvidenceArgs.model_validate(args)
-                    result, new_refs = self._read_evidence(task_id, payload.item_id)
+                    already_read = read_snapshots.get(payload.item_id)
+                    if already_read:
+                        # Re-sending the whole snapshot on every read made a two-product run
+                        # grow without bound. The earlier content is still in the transcript,
+                        # so a repeat only needs to confirm nothing changed.
+                        result, new_refs = self._repeat_read(task_id, payload.item_id, already_read)
+                    else:
+                        result, new_refs = self._read_evidence(task_id, payload.item_id)
                     snapshot_id = result.get("snapshot_id")
                     if snapshot_id:
-                        repeated = read_snapshots.get(payload.item_id) == snapshot_id
+                        repeated = result.get("freshness") == "same_snapshot"
                         if not repeated:
                             calculation_reviewed = False
                             price_comparisons = []
-                        result["freshness"] = "same_snapshot" if repeated else "new_to_this_run"
-                        result["retrieval_note"] = (
+                        result.setdefault(
+                            "freshness", "same_snapshot" if repeated else "new_to_this_run"
+                        )
+                        result.setdefault(
+                            "retrieval_note",
                             "仍是上次读取的同一份快照；没有重新访问商品页或新增证据。"
                             if repeated
-                            else "首次读取这份已保存快照；本工具没有访问商品页。"
+                            else "首次读取这份已保存快照；本工具没有访问商品页。",
                         )
                         read_snapshots[payload.item_id] = snapshot_id
                     refs.update(new_refs)
                     if "error" not in result and payload.item_id not in read_items:
                         read_items.append(payload.item_id)
+                elif name == "search_product_evidence":
+                    payload = SearchEvidenceArgs.model_validate(args)
+                    result, new_refs = self._search_evidence(
+                        task_id, payload.item_id, payload.query, payload.kind, payload.limit
+                    )
+                    refs.update(new_refs)
                 elif name in {
                     "capture_product_page",
                     "collect_product_page",
