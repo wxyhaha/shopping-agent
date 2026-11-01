@@ -7,6 +7,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
@@ -24,7 +25,7 @@ from app.collection_process import (
 )
 from app.config import Settings
 from app.detail_dedupe import dedupe_detail_images, dedupe_texts
-from app.detail_vision import read_detail_image
+from app.detail_vision import BATCH_SIZE, chunked, read_detail_batch
 from app.image_fetch import fetch_image
 from app.models import utc_now
 from app.price_vision import looks_obfuscated, read_rendered_price
@@ -40,7 +41,10 @@ PRICE_ELEMENT_SELECTORS = (
 )
 # How many distinct detail images may be read per collection. Detail artwork carries most
 # of the product's real specifications, so this is generous; duplicates are removed first.
-DETAIL_IMAGE_LIMIT = 8
+DETAIL_IMAGE_LIMIT = 32
+# Concurrency: downloads are cheap I/O; vision calls are bounded by the gateway.
+DETAIL_FETCH_WORKERS = 5
+DETAIL_VISION_WORKERS = 10
 RESOURCE_DOMAINS = (
     "taobao.com",
     "tmall.com",
@@ -465,23 +469,71 @@ class BackgroundCollector:
         if not images:
             return snapshot
         chosen, duplicates = dedupe_detail_images(images, DETAIL_IMAGE_LIMIT)
+        if not chosen:
+            return snapshot
         policy = BrowserNetworkPolicy(
             self.resolver, trust_fake_ip_dns=self.settings.browser_trust_fake_ip_dns
         )
         coverage = snapshot.setdefault("coverage", [])
-        spec_lines: list[str] = []
-        claim_lines: list[str] = []
-        read_images = 0
         skipped: list[str] = []
-        for image in chosen:
-            check_cancel()
-            content, note = fetch_image(image["source_url"], platform, policy)
-            if content is None:
-                skipped.append(note)
+
+        # Download in parallel too: the artwork lives on a CDN and each fetch is independent.
+        downloaded: dict[int, bytes] = {}
+        with ThreadPoolExecutor(max_workers=DETAIL_FETCH_WORKERS) as pool:
+            futures = {
+                pool.submit(fetch_image, image["source_url"], platform, policy): position
+                for position, image in enumerate(chosen)
+            }
+            for future in as_completed(futures):
+                check_cancel()
+                position = futures[future]
+                try:
+                    content, note = future.result()
+                except Exception:  # A single failed download must not end the collection.
+                    skipped.append("详情图下载异常。")
+                    continue
+                if content is None:
+                    skipped.append(note)
+                else:
+                    downloaded[position] = content
+
+        # Read in batches; batches run concurrently because each is an independent request.
+        batches = chunked(list(downloaded.items()), BATCH_SIZE)
+        results: dict[int, tuple[list[str], list[str], list[str]]] = {}
+        with ThreadPoolExecutor(
+            max_workers=min(DETAIL_VISION_WORKERS, max(1, len(batches)))
+        ) as pool:
+            futures = {
+                pool.submit(
+                    read_detail_batch, [content for _, content in group], self.settings
+                ): group
+                for group in batches
+            }
+            for future in as_completed(futures):
+                check_cancel()
+                group = futures[future]
+                try:
+                    grouped, note = future.result()
+                except Exception:  # One failed batch must not discard the others.
+                    skipped.append("详情图识别批次异常。")
+                    continue
+                if not grouped:
+                    skipped.append(note)
+                    continue
+                for offset, buckets in grouped.items():
+                    if 0 <= offset < len(group):
+                        results[group[offset][0]] = buckets
+
+        parameter_lines: list[str] = []
+        claim_lines: list[str] = []
+        policy_lines: list[str] = []
+        read_images = 0
+        for position, image in enumerate(chosen):
+            buckets = results.get(position)
+            if not buckets:
                 continue
-            specs, claims, note = read_detail_image(content, self.settings)
-            if not specs and not claims:
-                skipped.append(note)
+            parameters, claims, policies = buckets
+            if not parameters and not claims and not policies:
                 continue
             read_images += 1
             index = image.get("index", 0)
@@ -491,28 +543,34 @@ class BackgroundCollector:
                     "evidence_id": evidence_id,
                     "field_path": f"detail_images[{index}].text",
                     "source": "detail_image_vision",
-                    "excerpt": " / ".join(specs + claims)[:2048],
+                    "excerpt": " / ".join(parameters + claims + policies)[:2048],
+                    # The URL is kept for traceability even though the report only shows a
+                    # "详情图" tag; it costs a few dozen bytes per snapshot.
                     "locator": image["source_url"][:256],
                 }
             )
             coverage.append(
                 {
                     "field_path": f"detail_images[{index}].text",
-                    # Not "observed": the wording is a merchant claim about the product.
+                    # Not "observed": the wording is the seller's own description.
                     "status": "ambiguous",
-                    "note": note,
+                    "note": "详情图文字由视觉模型读取，属商家标注。",
                     "evidence_ids": [evidence_id],
                 }
             )
-            spec_lines.extend(specs)
+            parameter_lines.extend(parameters)
             claim_lines.extend(claims)
-        # The same claim often appears on several panels; keep one copy of each.
-        spec_lines = dedupe_texts(spec_lines)
+            policy_lines.extend(policies)
+        # The same line often appears on several panels; keep one copy of each.
+        parameter_lines = dedupe_texts(parameter_lines)
         claim_lines = dedupe_texts(claim_lines)
-        if spec_lines:
-            self._add_detail_items(snapshot, "spec", spec_lines)
+        policy_lines = dedupe_texts(policy_lines)
+        if parameter_lines:
+            self._add_detail_items(snapshot, "parameter", parameter_lines)
         if claim_lines:
             self._add_detail_items(snapshot, "claim", claim_lines)
+        if policy_lines:
+            self._add_detail_items(snapshot, "policy", policy_lines)
         if not read_images:
             coverage.append(
                 {
@@ -536,26 +594,32 @@ class BackgroundCollector:
     def _add_detail_items(self, snapshot: dict, kind: str, lines: list[str]) -> None:
         """Record recognised detail-image text as its own observation set.
 
-        ``spec`` and ``claim`` are kept under separate paths so neither can be mistaken for
-        the measured specification table (``specs.*``), which comes from the DOM.
+        Each kind stays under its own path so none can be mistaken for the measured
+        specification table (``specs.*``), which comes from the DOM. The label shown to the
+        user is a single "详情图" tag: which image a line came from is kept in the evidence
+        locator for traceability, not repeated in every label.
         """
         evidence_ids = [
             entry["evidence_id"]
             for entry in snapshot.get("evidence", [])
             if entry.get("source") == "detail_image_vision"
         ][:20]
-        label = "详情图参数" if kind == "spec" else "详情图宣传表述"
-        note = (
-            "来自详情图识别，属商家标注，未经独立核实。"
-            if kind == "spec"
-            else "详情图中的主观或宣传表述，不能作为参数依据。"
-        )
+        labels = {
+            "parameter": "详情图",
+            "claim": "详情图 · 宣传",
+            "policy": "详情图 · 购买条件",
+        }
+        notes = {
+            "parameter": "来自商品详情图，属商家标注，未经独立核实。",
+            "claim": "详情图中的评价或宣传表述，不能作为参数依据。",
+            "policy": "详情图中的售后、配送或购买条件，以页面实际为准。",
+        }
         for position, line in enumerate(lines, start=1):
             snapshot.setdefault("fields", []).append(
                 {
                     "observation_id": f"detail-{kind}-{position:02d}",
                     "field_path": f"detail_images.{kind}_{position:02d}",
-                    "label": label,
+                    "label": labels.get(kind, "详情图"),
                     "raw_value": line[:2048],
                     "status": "ambiguous",
                     "evidence_ids": evidence_ids,
@@ -565,7 +629,7 @@ class BackgroundCollector:
             {
                 "field_path": f"detail_images.{kind}",
                 "status": "ambiguous",
-                "note": note,
+                "note": notes.get(kind, "来自商品详情图。"),
                 "evidence_ids": evidence_ids,
             }
         )
