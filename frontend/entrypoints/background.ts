@@ -317,6 +317,45 @@ async function handleRequest(request: ExtensionRequest, sender: Browser.runtime.
   }
 }
 
+// The capture request has to be answered even when the product tab is in the background: a
+// timer inside the content script is frozen along with its tab, which made the extension
+// look "unreliable" — it simply stopped polling. An alarm wakes the service worker instead,
+// and the worker then asks the tab's content script to read its own DOM.
+const CAPTURE_ALARM = "shopping-agent:capture-poll";
+const CAPTURE_ALARM_MINUTES = 1;
+// How long a tab may take to answer that wake-up before the alarm moves on.
+const TAB_PROBE_TIMEOUT_MS = 3000;
+
+type TabProbe = { ok: true; job: unknown } | { ok: false };
+
+async function probeTabForCapture(tabId: number, pageUrl: string): Promise<TabProbe | null> {
+  try {
+    const result = (await Promise.race([
+      browser.tabs.sendMessage(tabId, { type: "shopping-agent:poll-capture-now", url: pageUrl }),
+      new Promise((resolve) => setTimeout(() => resolve(null), TAB_PROBE_TIMEOUT_MS)),
+    ])) as { ok?: boolean; job?: unknown } | null;
+    if (!result) return null;
+    return result.ok ? { ok: true, job: result.job ?? null } : { ok: false };
+  } catch {
+    // The tab has no content script (not a product page, or it was reloaded and lost it).
+    return null;
+  }
+}
+
+async function pollAllProductTabs(): Promise<void> {
+  let tabs: Browser.tabs.Tab[];
+  try {
+    tabs = await browser.tabs.query({});
+  } catch {
+    return;
+  }
+  for (const tab of tabs) {
+    if (tab.id === undefined || !tab.url || !isSupportedProductUrl(tab.url)) continue;
+    const probe = await probeTabForCapture(tab.id, tab.url);
+    if (probe?.ok && probe.job) return; // One claimed job per alarm tick is enough.
+  }
+}
+
 export default defineBackground(() => {
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const request = parseRequest(message);
@@ -326,4 +365,12 @@ export default defineBackground(() => {
     });
     return true;
   });
+
+  // Keep the alarm registered; the worker itself may be asleep when this runs.
+  void browser.alarms.create(CAPTURE_ALARM, { periodInMinutes: CAPTURE_ALARM_MINUTES });
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === CAPTURE_ALARM) void pollAllProductTabs();
+  });
+  // Also poll right after startup, so a reloaded extension recovers immediately.
+  void pollAllProductTabs();
 });

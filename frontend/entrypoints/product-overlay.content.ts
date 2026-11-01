@@ -259,8 +259,8 @@ async function mountProductAssistant(
   let bridgeNextPoll = 0;
   let bridgeFailures = 0;
 
-  async function pollResearchCapture(): Promise<void> {
-    if (busy || bridgeBusy || Date.now() < bridgeNextPoll || !isSupportedProductUrl(location.href)) return;
+  async function pollResearchCapture(): Promise<"idle" | "captured" | "failed" | "busy"> {
+    if (busy || bridgeBusy || Date.now() < bridgeNextPoll || !isSupportedProductUrl(location.href)) return "busy";
     bridgeBusy = true;
     try {
       const result = await pollCaptureBridge({
@@ -285,11 +285,13 @@ async function mountProductAssistant(
       bridgeConnection.dataset.error = String(result === "failed");
       bridgeFailures = 0;
       bridgeNextPoll = Date.now() + 4000;
+      return result;
     } catch (cause) {
       bridgeFailures += 1;
       bridgeConnection.textContent = `自动采集通道未连接：${cause instanceof Error ? cause.message : "请刷新商品页后重试。"}`;
       bridgeConnection.dataset.error = "true";
       bridgeNextPoll = Date.now() + Math.min(60_000, 4000 * 2 ** Math.min(bridgeFailures, 4));
+      return "failed";
     } finally {
       bridgeBusy = false;
     }
@@ -499,6 +501,22 @@ async function mountProductAssistant(
 
   updatePage();
   await loadTasks();
+  // The service worker drives polling through an alarm, so a backgrounded tab still answers:
+  // a timer in this page is frozen along with its tab. The local interval remains as a fast
+  // path while the tab is in front.
+  browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    const request = message as { type?: string; url?: string } | null;
+    if (request?.type !== "shopping-agent:poll-capture-now") return;
+    if (request.url && request.url !== location.href) {
+      sendResponse({ ok: true, job: null });
+      return;
+    }
+    void pollResearchCapture().then(
+      (result) => sendResponse({ ok: true, job: result === "captured" }),
+      () => sendResponse({ ok: false }),
+    );
+    return true; // Keep the channel open for the async reply.
+  });
   ctx.setInterval(() => void pollResearchCapture(), 4000);
   void pollResearchCapture();
 }

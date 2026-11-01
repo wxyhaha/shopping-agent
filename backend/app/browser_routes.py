@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import secrets
 import threading
@@ -227,8 +228,12 @@ def _enrich_snapshot_in_background(snapshot_id: str, page_url: str, settings) ->
                 policy = BrowserNetworkPolicy(
                     public_addresses, trust_fake_ip_dns=settings.browser_trust_fake_ip_dns
                 )
+                # Copy first: the enrichment mutates the dict in place and returns the same
+                # object, and SQLAlchemy's JSON column does not track deep mutations —
+                # assigning the identical reference produced no UPDATE, so the detail text
+                # was silently lost while the status flag still flipped to done.
                 enriched = enrich_detail_images(
-                    record.payload,
+                    copy.deepcopy(record.payload),
                     settings,
                     identity.platform if identity else "tmall",
                     policy,

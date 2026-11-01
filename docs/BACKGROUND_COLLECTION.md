@@ -73,6 +73,24 @@ uv run python -m scripts.browser_session jd
 - `(run_id, tool_call_id)` 哈希形成稳定操作标识。已保存快照的检查点重放直接读取同一快照，不再访问页面；浏览器已读但尚未提交时进程崩溃，恢复可能重新执行只读访问，不承诺网络请求恰好一次。
 - 操作上限按持久化尝试记录计数；同一调用不能换商品/参数。保存前在写事务核对运行状态，已取消的运行拒绝晚到结果。未保存的网络失败也记为一次尝试。
 
+## 扩展轮询由 service worker 驱动（2026-11-01）
+
+早先轮询由商品页内容脚本的 `setInterval` 驱动。浏览器会随标签页一起冻结该定时器，**页面切到后台后心跳停止**，后台看到 `connected=false`、采集请求 `attempts=0`（从未被领取）。这使扩展表现为“时好时坏”，实际原因是被冻结。
+
+现在改为：
+
+- 扩展新增 `alarms` 权限，service worker 用 `chrome.alarms`（每分钟）唤醒并轮询；alarm 能在 SW 休眠时把它唤醒，不依赖任何标签页的活跃状态。
+- SW 遍历已打开的商品页标签，用 `tabs.sendMessage` 请内容脚本执行一次 claim（3 秒超时）。DOM 仍由内容脚本读取——SW 拿不到页面 DOM。
+- 内容脚本原有的 4 秒 `setInterval` 保留为前台快路径。
+
+实测：**页面处于后台（前台是其它标签页）时，采集请求 `attempts=1` 并 `completed`**，此前该场景为 `attempts=0`。
+
+## 详情图补全必须深拷贝后再写回（2026-11-01）
+
+`enrich_detail_images` 原地修改 payload dict 并返回同一个对象。SQLAlchemy 的 JSON 列**不跟踪深度变更**，因此 `record.payload = enriched` 赋的是同一引用，`commit` 时不产生 `UPDATE`：`detail_enrichment` 标记照常翻成 `done`，但识别出的文字从未写入数据库——表现为“补全跑完了却一条详情图文字都没有”。
+
+修复：写回前先 `copy.deepcopy`，让 ORM 看到一个不同的对象。修复后同一份快照写回 28 条详情图文字、78 条分类字段。
+
 ## 扩展通道的详情图补全（2026-11-01）
 
 扩展只能读 DOM，读不了图片像素；而后台持有模型凭据。因此详情图识别被抽成 `detail_enrich.py`，**两个采集通道共用同一套逻辑**，快照的含义不再取决于由谁产生。

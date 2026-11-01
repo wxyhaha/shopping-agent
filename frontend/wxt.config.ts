@@ -5,7 +5,9 @@ export default defineConfig({
   manifest: {
     name: "Shopping Agent 商品助手",
     description: "在淘宝、天猫和京东页面快速加入本地比较任务。",
-    permissions: ["activeTab", "storage"],
+    // "alarms" wakes the service worker so a capture request is still picked up while the
+    // product tab sits in the background; timers inside that tab would be frozen.
+    permissions: ["activeTab", "storage", "alarms"],
     host_permissions: [
       "http://127.0.0.1/*",
       "https://127.0.0.1/*",
