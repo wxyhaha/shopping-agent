@@ -1,11 +1,13 @@
 import hashlib
 import secrets
+import threading
 from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from sqlalchemy import and_, or_, select, update
 
+from app.background_collector import BrowserNetworkPolicy, public_addresses
 from app.browser_capture import LEASE_SECONDS, MAX_CLAIMS, aware, expire_capture_jobs
 from app.browser_schemas import (
     BrowserCaptureComplete,
@@ -17,7 +19,8 @@ from app.browser_schemas import (
     BrowserPageConnection,
 )
 from app.capture_urls import product_url_identity
-from app.models import AgentRun, BrowserCaptureJob, ProductItem, Task, utc_now
+from app.config import get_settings
+from app.models import AgentRun, BrowserCaptureJob, CaptureSnapshot, ProductItem, Task, utc_now
 from app.routes import SessionDependency, persist_capture_snapshot
 
 router = APIRouter(prefix="/api/v1/browser-captures", tags=["browser-tools"])
@@ -159,24 +162,86 @@ def complete_capture(
         raise HTTPException(422, "必须在收到请求后重新读取页面，不能回传旧快照。")
     # Reuse all capture identity, schema, evidence, URL and size validation. The job ID is
     # a stable idempotency key, so a lost completion response cannot duplicate the snapshot.
+    capture = payload.capture
+    settings = get_settings()
+    # Detail-image reading must not run before the lease is acknowledged: reading ~30 images
+    # takes about a minute, while the extension gives up after 20 seconds. Doing it inline
+    # made every capture report a timeout even though the page had been read successfully.
+    # Enrichment therefore runs in the background, after this response is returned.
+    enrich = settings.detail_vision_enabled and bool(capture.images)
     snapshot = persist_capture_snapshot(
         run.task_id,
         job.item_id,
-        payload.capture,
+        capture,
         response,
         session,
         idempotency_key=f"browser-capture:{job.id}",
         commit=False,
     )
+    # Mark the snapshot as pending before the thread starts, so a reader that arrives during
+    # the read waits for the complete evidence instead of seeing a half-filled snapshot.
+    # persist_capture_snapshot returns a read model, so the ORM row is updated directly.
+    if enrich:
+        record = session.get(CaptureSnapshot, snapshot.id)
+        if record is not None:
+            record.detail_enrichment = "pending"
     if job.status != "completed":
         session.refresh(run)
         if job.status != "claimed" or run.status != "running":
             raise HTTPException(409, "研究已停止，页面结果不再用于继续执行。")
         job.status, job.snapshot_id = "completed", snapshot.id
     session.commit()
+    if enrich:
+        snapshot_id = snapshot.id
+        page_url = capture.page_url
+        threading.Thread(
+            target=_enrich_snapshot_in_background,
+            args=(snapshot_id, page_url, settings),
+            daemon=True,
+            name="detail-image-enrichment",
+        ).start()
     response.status_code = 200
     response.headers["Cache-Control"] = "no-store"
     return BrowserCaptureResult(id=job.id, status="completed", snapshot_id=job.snapshot_id)
+
+
+def _enrich_snapshot_in_background(snapshot_id: str, page_url: str, settings) -> None:
+    """Read detail artwork for a stored snapshot without blocking the extension's reply.
+
+    The snapshot is already saved, so a failure here only means the detail text is missing;
+    the DOM-derived fields remain valid either way.
+    """
+    from app.database import create_session_factory, make_engine
+    from app.detail_enrich import enrich_detail_images
+    from app.models import CaptureSnapshot
+
+    engine = make_engine(settings.database_url)
+    try:
+        factory = create_session_factory(engine)
+        with factory() as session:
+            record = session.get(CaptureSnapshot, snapshot_id)
+            if record is None:
+                return
+            try:
+                identity = product_url_identity(page_url)
+                policy = BrowserNetworkPolicy(
+                    public_addresses, trust_fake_ip_dns=settings.browser_trust_fake_ip_dns
+                )
+                enriched = enrich_detail_images(
+                    record.payload,
+                    settings,
+                    identity.platform if identity else "tmall",
+                    policy,
+                )
+                record.payload = enriched
+            except Exception:
+                # The DOM-derived fields are still valid; only the detail text is missing.
+                pass
+            # Always settle the flag, so a waiting reader is never blocked by a failed read.
+            record.detail_enrichment = "done"
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 @router.post("/{job_id}/fail", response_model=BrowserCaptureResult)

@@ -81,6 +81,10 @@ class CaptureSnapshot(Base):
     canonical_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     schema_version: Mapped[int] = mapped_column(default=1)
     payload: Mapped[dict[str, object]] = mapped_column(JSON)
+    # Detail-image text is read after the snapshot is stored (a 30-image read takes about a
+    # minute, longer than the extension waits). This marks whether that follow-up work has
+    # finished, so a reader can wait for the complete evidence instead of racing it.
+    detail_enrichment: Mapped[str] = mapped_column(String(16), default="done")
     idempotency_key: Mapped[str] = mapped_column(String(128))
     request_hash: Mapped[str] = mapped_column(String(64))
     item: Mapped[ProductItem] = relationship(back_populates="captures")

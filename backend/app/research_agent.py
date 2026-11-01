@@ -360,6 +360,30 @@ class ResearchRuntime(SearchRuntimeMixin):
             run.updated_at = utc_now()
             session.commit()
 
+    # How long to wait for the follow-up detail-image read before reading evidence anyway.
+    DETAIL_ENRICHMENT_WAIT_SECONDS = 90
+
+    def _await_detail_enrichment(self, snapshot_id: str, deadline: float) -> None:
+        """Block until a snapshot's detail-image read settles, or the wait expires.
+
+        The read runs after the snapshot is stored (it outlives the extension's reply), so a
+        reader that arrives too early would otherwise hand the model a snapshot whose detail
+        text is still missing. Waiting a bounded time keeps that from being a silent race;
+        if the wait expires the evidence is used as-is, which is still valid DOM data.
+        """
+        from app.models import CaptureSnapshot
+
+        limit = min(
+            time.monotonic() + self.DETAIL_ENRICHMENT_WAIT_SECONDS,
+            deadline - 1,
+        )
+        while time.monotonic() < limit:
+            with self.sessions() as session:
+                record = session.get(CaptureSnapshot, snapshot_id)
+                if record is None or record.detail_enrichment != "pending":
+                    return
+            time.sleep(0.25)
+
     def _read_evidence(
         self, task_id: str, item_id: str, snapshot_id: str | None = None
     ) -> tuple[dict, dict]:
@@ -689,6 +713,10 @@ class ResearchRuntime(SearchRuntimeMixin):
                     # A timeout has no extension message; keep the two cases distinct.
                     error_detail = None
             if status == "completed" and snapshot_id:
+                # Detail-image text is read after the snapshot is stored, because the read
+                # outlives the extension's reply. Wait for it so the evidence handed to the
+                # model is complete rather than a snapshot that is still filling in.
+                self._await_detail_enrichment(snapshot_id, deadline)
                 result, refs = self._read_evidence(task_id, payload.item_id, snapshot_id)
                 if not result.get("snapshot_id"):
                     return {

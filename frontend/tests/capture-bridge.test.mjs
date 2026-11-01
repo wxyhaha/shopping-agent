@@ -88,3 +88,20 @@ test("adapter exceptions return a capture failure instead of a snapshot", async 
   assert.equal(await pollCaptureBridge(page), "failed");
   assert.equal(messages[1].errorCode, "capture_failed");
 });
+
+test("a failed snapshot upload still reports fail-capture so the job is diagnosable", async () => {
+  // Without this the job stayed "claimed" until its lease expired and the backend only
+  // recorded a bare timeout, which hid the real cause during debugging.
+  const messages = [];
+  const page = host(async (message) => {
+    messages.push(message);
+    if (message.type.endsWith("claim-capture")) return { ok: true, job };
+    if (message.type.endsWith("complete-capture")) throw new Error("message channel closed");
+    return { ok: true };
+  });
+  assert.equal(await pollCaptureBridge(page), "failed");
+  const fail = messages.find((message) => message.type.endsWith("fail-capture"));
+  assert.ok(fail, "upload failure must be reported to the backend");
+  assert.equal(fail.errorCode, "capture_failed");
+  assert.match(fail.detail, /message channel closed/);
+});

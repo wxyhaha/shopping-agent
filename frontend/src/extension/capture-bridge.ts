@@ -77,6 +77,19 @@ export async function pollCaptureBridge(host: CaptureBridgeHost): Promise<"idle"
       error = `补采集结果未收到确认：${cause instanceof Error ? cause.message : String(cause)}`;
     }
   }
+  // The upload failed, so the job is still "claimed" on the backend. Reporting the failure
+  // explicitly is what makes it diagnosable: without this the job simply sat until its lease
+  // expired and the record showed a bare timeout with no reason.
+  try {
+    await host.send({
+      type: "shopping-agent:fail-capture",
+      ...shared,
+      errorCode: "capture_failed",
+      detail: error,
+    });
+  } catch {
+    // If even this cannot be sent, there is nothing further the page can do.
+  }
   host.status(error);
   return "failed";
 }
