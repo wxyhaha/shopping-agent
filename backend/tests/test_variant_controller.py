@@ -34,7 +34,9 @@ PAGE = """<!doctype html><meta charset="utf-8"><h1>合成可选规格家用网�
 
 def service(tmp_path, html=PAGE):
     return BackgroundCollector(
-        Settings(_env_file=None, data_dir=tmp_path, browser_max_scrolls=0),
+        Settings(
+            _env_file=None, data_dir=tmp_path, browser_max_scrolls=0, browser_detail_wait_seconds=2
+        ),
         route_fixture=lambda route: route.fulfill(
             content_type="text/html; charset=utf-8", body=html
         ),

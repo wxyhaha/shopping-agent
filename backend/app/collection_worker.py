@@ -48,6 +48,9 @@ def main():
         # The parent reads a font-obfuscated price from these pixels; this process never
         # holds model credentials, so it must not attempt the recognition itself.
         "price_screenshot_png": result.price_screenshot_png,
+        # The parent reads detail artwork after storing the snapshot, so it needs to know the
+        # worker skipped that step.
+        "detail_read_pending": result.detail_read_pending,
     }
     path = Path(payload["output_path"])
     path.write_text(json.dumps(output, ensure_ascii=False), encoding="utf-8")

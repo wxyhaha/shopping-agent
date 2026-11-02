@@ -74,6 +74,10 @@ class CollectionResult:
     # Base64 PNG of the price area when the digits were painted by a custom font. Only the
     # parent process may read it, so the isolated worker hands the pixels back instead.
     price_screenshot_png: str | None = None
+    # Set when the snapshot still needs its detail artwork read. Reading ~40 panels takes about
+    # a minute, which does not fit inside one collection, so the caller runs it afterwards with
+    # a pending marker instead of extending the browser step.
+    detail_read_pending: bool = False
 
 
 def visible_price_element(page):
@@ -95,6 +99,104 @@ def visible_price_element(page):
 
 def session_name(platform: str) -> str:
     return "taobao" if platform in {"taobao", "tmall"} else "jd"
+
+
+def session_home_url(platform: str) -> str:
+    """Site front page used to establish an active session before opening a product page."""
+    return "https://www.jd.com/" if platform == "jd" else "https://www.taobao.com/"
+
+
+# How long to keep waiting for the lazily injected detail section, and how often to look.
+# This is the only reliable signal on Tmall: readyState completes at ~800 ms with the document
+# still 3 600 px tall, and the detail panels arrive several seconds later. The budget is
+# therefore generous, while still leaving time to parse and to check the deadline.
+DETAIL_WAIT_SECONDS = 25.0
+DETAIL_WAIT_INTERVAL = 0.5
+# Counts images inside the detail containers, mirroring the selectors in collector.js. The
+# count only decides whether to keep waiting.
+DETAIL_SECTION_PROBE = """
+() => {
+  const selectors = ['#J_DivItemDesc', '#description', '#detailContent', '#detail',
+    "[class*='descV8']", "[class*='detail-content']", "[class*='detailContent']",
+    '.page-content-area'];
+  let count = 0;
+  for (const selector of selectors) {
+    for (const node of document.querySelectorAll(selector)) {
+      count += node.querySelectorAll('img').length;
+    }
+  }
+  return count;
+}
+"""
+# Counts the containers themselves. Used once before a long wait: a page with no container at
+# all will not grow one, so waiting the full budget there only delays the result.
+DETAIL_CONTAINER_PROBE = """
+() => {
+  const selectors = ['#J_DivItemDesc', '#description', '#detailContent', '#detail',
+    "[class*='descV8']", "[class*='detail-content']", "[class*='detailContent']",
+    '.page-content-area'];
+  let count = 0;
+  for (const selector of selectors) count += document.querySelectorAll(selector).length;
+  return count;
+}
+"""
+
+
+def wait_for_detail_images(page, deadline: float, check_cancel, wait_seconds=None) -> str:
+    """Wait until the detail section has images, and say which happened.
+
+    Returning one of ``ready`` / ``empty`` / ``timeout`` separates "the page has no detail
+    section" from "it had not rendered yet", so a missing read is not mistaken for an absent
+    section. The wait never takes more than its own budget nor more than what is left of the
+    collection, so a slow page still returns instead of overrunning the deadline.
+    """
+    now = time.monotonic()
+    remaining = deadline - now
+    if remaining <= 1.0:
+        return "timeout"
+    # Check once before committing to a long wait. With no container at all the page will not
+    # grow one, so waiting the full budget only delays the result. A container that exists but
+    # holds no images also gets a short grace period rather than the full budget: that is the
+    # shape of a synthetic fixture whose detail block is text only.
+    try:
+        containers = int(page.evaluate(DETAIL_CONTAINER_PROBE) or 0)
+    except PlaywrightError:
+        return "timeout"
+    if containers == 0:
+        return "empty"
+    # Leave a margin for parsing and for the deadline check that follows, but otherwise use
+    # the wait budget: the section can take far longer than the scroll pass to appear.
+    budget = min(
+        DETAIL_WAIT_SECONDS if wait_seconds is None else wait_seconds,
+        max(0.0, remaining - 8.0),
+    )
+    limit = now + budget
+    seen = 0
+    while True:
+        check_cancel()
+        try:
+            seen = int(page.evaluate(DETAIL_SECTION_PROBE) or 0)
+        except PlaywrightError:
+            return "timeout"
+        if seen > 0:
+            return "ready"
+        if time.monotonic() >= limit:
+            return "empty"
+        # Keep the page moving while watching. The section is injected on scroll, and staying
+        # still at one position is what left the page at 3 600 px on earlier attempts.
+        try:
+            page.evaluate(
+                "() => {"
+                " const h = document.body.scrollHeight;"
+                " if (window.scrollY + innerHeight >= h - 300) {"
+                "   window.scrollTo(0, Math.max(0, h * 0.35));"
+                " } else {"
+                "   window.scrollBy(0, Math.max(500, innerHeight * 0.8));"
+                " } }"
+            )
+        except PlaywrightError:
+            return "timeout"
+        page.wait_for_timeout(int(DETAIL_WAIT_INTERVAL * 1000))
 
 
 def product_navigation_url(identity: ProductUrlIdentity, original_url: str) -> str:
@@ -391,6 +493,13 @@ class BackgroundCollector:
                         # The worker captures the price pixels; this process reads them,
                         # because only it holds the model credentials.
                         "price_vision_enabled": self.settings.price_vision_enabled,
+                        # The browser runs in this worker, so the takeover settings must
+                        # travel with it; the worker reads no .env of its own.
+                        "browser_cdp_enabled": self.settings.browser_cdp_enabled,
+                        "browser_cdp_url": self.settings.browser_cdp_url,
+                        # The worker decides whether a detail read is still owed, so it must
+                        # know the switch; otherwise it always reports "nothing pending".
+                        "detail_vision_enabled": self.settings.detail_vision_enabled,
                     },
                 },
                 deadline=deadline,
@@ -400,14 +509,20 @@ class BackgroundCollector:
             screenshot = result.get("price_screenshot_png")
             if snapshot and screenshot and self.settings.price_vision_enabled:
                 snapshot = self._apply_vision_price(snapshot, screenshot)
+            detail_pending = False
             if snapshot and self.settings.detail_vision_enabled:
-                # Detail artwork is pixels, so its words need a vision read. This runs here,
-                # not in the worker, because only this process holds the model credentials.
-                snapshot = self._apply_detail_vision(snapshot, identity.platform, check_cancel)
+                # Detail artwork is pixels, so its words need a vision read. That read takes
+                # about a minute for a full section and would push the collection past its
+                # deadline, so it is requested here and performed by the caller afterwards.
+                detail_pending = True
             return CollectionResult(
                 CaptureSnapshotSubmit.model_validate(snapshot) if snapshot else None,
                 result.get("error_code"),
                 result.get("message"),
+                # The worker reports the flag it computed itself; trusting only the parent's
+                # own configuration left it unset and detail text was silently never read.
+                detail_read_pending=detail_pending
+                and bool(result.get("detail_read_pending", True)),
             )
         except CollectionDeadline:
             return CollectionResult(
@@ -551,22 +666,50 @@ class BackgroundCollector:
             )
         with sync_playwright() as playwright:
             browser_args = ["--disable-ipv6"] if self.settings.browser_trust_fake_ip_dns else []
-            browser = playwright.chromium.launch(
-                headless=True, timeout=remaining_ms(), args=browser_args
-            )
+            attached = False
+            attach_error = ""
+            browser = None
             context = None
+            if self.settings.browser_cdp_enabled:
+                # Prefer the browser the user signed into: Taobao/Tmall send a launched
+                # Chromium to a login wall because it reports navigator.webdriver, and that
+                # wall rejects the slider verification. This only attaches when that browser
+                # is actually running with its debugging port.
+                try:
+                    browser = playwright.chromium.connect_over_cdp(
+                        self.settings.browser_cdp_url, timeout=min(5000, remaining_ms())
+                    )
+                    context = browser.contexts[0] if browser.contexts else None
+                    attached = context is not None
+                    if not attached:
+                        attach_error = "该浏览器没有可用的上下文"
+                except Exception as exc:
+                    # Keep the reason: a silent fallback looks identical to a normal run, and
+                    # then a "需要登录" result hides the fact that takeover never happened.
+                    browser, context, attached = None, None, False
+                    attach_error = f"{type(exc).__name__}: {str(exc)[:120]}"
+            if not attached:
+                browser = playwright.chromium.launch(
+                    headless=True, timeout=remaining_ms(), args=browser_args
+                )
             try:
-                state_path = (
-                    self.settings.browser_session_dir / f"{session_name(identity.platform)}.json"
-                )
-                context = browser.new_context(
-                    viewport={"width": 1440, "height": 1000},
-                    locale="zh-CN",
-                    service_workers="block",
-                    accept_downloads=False,
-                    storage_state=str(state_path) if state_path.is_file() else None,
-                )
-                context.set_default_timeout(remaining_ms())
+                if attached:
+                    # The shared context is the user's own session; only a page this run opens
+                    # is touched, and its cookie jar is not replaced.
+                    context.set_default_timeout(remaining_ms())
+                else:
+                    state_path = (
+                        self.settings.browser_session_dir
+                        / f"{session_name(identity.platform)}.json"
+                    )
+                    context = browser.new_context(
+                        viewport={"width": 1440, "height": 1000},
+                        locale="zh-CN",
+                        service_workers="block",
+                        accept_downloads=False,
+                        storage_state=str(state_path) if state_path.is_file() else None,
+                    )
+                    context.set_default_timeout(remaining_ms())
 
                 navigation_gate = None
 
@@ -628,11 +771,37 @@ class BackgroundCollector:
                         except PlaywrightError:
                             pass
 
-                context.route("**/*", route_request)
-                # Do not connect_to_server: Playwright keeps this socket local. A synchronous
-                # close inside this callback can deadlock the driver's dispatch greenlet.
-                context.route_web_socket("**/*", lambda route: None)
+                if attached:
+                    # Taobao treats a page opened in an otherwise idle profile as a new
+                    # visitor and asks it to log in again, even when the stored cookies are
+                    # valid. Visiting the site's own front page first establishes the session
+                    # so the product page loads normally. Measured: without this the same
+                    # product page redirected to login.taobao.com every time.
+                    try:
+                        warm = context.new_page()
+                        warm.goto(
+                            session_home_url(identity.platform),
+                            wait_until="domcontentloaded",
+                            timeout=remaining_ms(15000),
+                        )
+                        warm.wait_for_timeout(1200)
+                        warm.close()
+                    except (PlaywrightError, PlaywrightTimeout):
+                        # A failed warm-up must not decide the collection; the product page
+                        # navigation below still reports its own outcome.
+                        pass
                 page = context.new_page()
+                if attached:
+                    # Route on this page only. Routing the shared context would also filter
+                    # the tabs the user is browsing in the same window.
+                    page.route("**/*", route_request)
+                    page.route_web_socket("**/*", lambda route: None)
+                else:
+                    context.route("**/*", route_request)
+                    # Do not connect_to_server: Playwright keeps this socket local. A
+                    # synchronous close inside this callback can deadlock the driver's
+                    # dispatch greenlet.
+                    context.route_web_socket("**/*", lambda route: None)
                 context.on("page", lambda popup: popup.close())
                 timed_out = False
                 response = None
@@ -643,19 +812,25 @@ class BackgroundCollector:
                 except PlaywrightTimeout:
                     timed_out = True
                 check_cancel()
-                for _ in range(12):
-                    if time.monotonic() >= deadline:
-                        break
-                    page.wait_for_timeout(remaining_ms(250))
-                    signals = reading_signals(page)
-                    if signals.get("hasProduct"):
-                        break
+                # readyState is not a usable signal here: on Tmall item pages it reaches
+                # "complete" at about 800 ms while the document is still 3 643 px tall, against
+                # ~49 000 px once the detail section is injected. Waiting for it therefore
+                # released the page far too early and the detail section was never found.
+                # Only a short settle is applied here; the detail wait below is what actually
+                # watches for the content.
+                page.wait_for_timeout(remaining_ms(1200))
                 signals = reading_signals(page)
                 gate = navigation_gate or access_gate(
                     page.url, signals, identity, response.status if response else None
                 )
                 if gate:
                     code, marker = gate
+                    # State which browser saw this, because "需要登录" means something very
+                    # different when read from the user's signed-in browser.
+                    mode_note = "已接管用户浏览器" if attached else "后台自带浏览器（无登录态）"
+                    marker = f"{marker}；读取方式：{mode_note}"
+                    if not attached and attach_error:
+                        marker = f"{marker}，接管失败：{attach_error}"
                     return CollectionResult(
                         unavailable_snapshot(
                             identity,
@@ -676,6 +851,16 @@ class BackgroundCollector:
                     page.evaluate("window.scrollBy(0, Math.max(600, innerHeight * .85))")
                     page.wait_for_timeout(remaining_ms(450))
                 check_cancel()
+                # The detail section is loaded lazily, so reaching the bottom does not mean it
+                # exists yet. Sampling it once would report "missing" for a page that simply
+                # had not rendered, which is what made most captures lose all detail text.
+                # Wait until detail images appear, and record which of the two happened.
+                detail_state = wait_for_detail_images(
+                    page,
+                    deadline,
+                    check_cancel,
+                    self.settings.browser_detail_wait_seconds,
+                )
                 # Reveal a collapsed parameter table before parsing; without the click the
                 # table is simply absent from the DOM and would be reported as missing.
                 expanded = expand_spec_panel(page)
@@ -710,6 +895,21 @@ class BackgroundCollector:
                             "note": f"已展开“{expanded}”标签后再读取；展开本身不是参数证据。",
                         }
                     )
+                if detail_state != "ready":
+                    # Distinguish "this page has no detail section" from "it had not rendered
+                    # in time"; the two used to be reported as the same missing field.
+                    raw.setdefault("coverage", []).append(
+                        {
+                            "field_path": "page.detail_loading",
+                            "status": "ambiguous",
+                            "note": (
+                                f"等待 {int(DETAIL_WAIT_SECONDS)} 秒后仍未看到详情图区域，"
+                                "按页面没有该区域记录（可能尚未加载或被折叠）。"
+                                if detail_state == "empty"
+                                else "等待详情图区域时页面读取中断，未确认该区域是否存在。"
+                            ),
+                        }
+                    )
                 if self.settings.price_vision_enabled:
                     # The page can render the price through a custom font, leaving only
                     # private-use characters in the DOM. Capture what was painted; the
@@ -724,12 +924,51 @@ class BackgroundCollector:
                             "note": "页面等待达到时限，只记录实际加载的资料。",
                         }
                     )
+                # Record which browser actually read the page. Attaching to the user's own
+                # browser and launching a private one produce very different results on sites
+                # that require a login, so the difference must be visible rather than inferred.
+                raw["coverage"].append(
+                    {
+                        "field_path": "page.capture_mode",
+                        # "ambiguous" because this records how the page was read rather than a
+                        # fact observed on the page; observed coverage must cite evidence.
+                        "status": "ambiguous",
+                        "note": (
+                            "已接管用户已登录的浏览器读取页面。"
+                            if attached
+                            else "使用后台自带浏览器读取页面（无用户登录态）"
+                            + (f"；接管失败原因：{attach_error}" if attach_error else "")
+                        ),
+                    }
+                )
                 screenshot = raw.pop("price_screenshot_png", None)
                 return CollectionResult(
                     CaptureSnapshotSubmit.model_validate(raw),
                     price_screenshot_png=screenshot,
+                    # This process owns the browser step only. The caller holds the model
+                    # credentials and the database, so it performs the detail read itself.
+                    #
+                    # A variant switch does not ask for that read: choosing an option changes
+                    # the selection and its price, never the artwork. Re-reading it took over
+                    # a minute per switch and pushed whole runs past their deadline, while the
+                    # text was already captured on the first read of this product.
+                    detail_read_pending=bool(
+                        self.settings.detail_vision_enabled
+                        and raw.get("images")
+                        and variant_request is None
+                    ),
                 )
             finally:
-                if context:
-                    context.close()
-                browser.close()
+                if attached:
+                    # Never close the shared context: it is the user's own browser session.
+                    # Closing the CDP connection only detaches this process.
+                    try:
+                        page.close()  # type: ignore[possibly-undefined]
+                    except Exception:
+                        pass
+                    browser.close()
+                else:
+                    if context:
+                        context.close()
+                    if browser:
+                        browser.close()

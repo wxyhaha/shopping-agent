@@ -52,7 +52,9 @@ def fixture_route(html=PAGE):
 
 def collector(tmp_path, html=PAGE):
     return BackgroundCollector(
-        Settings(_env_file=None, data_dir=tmp_path, browser_max_scrolls=2),
+        Settings(
+            _env_file=None, data_dir=tmp_path, browser_max_scrolls=2, browser_detail_wait_seconds=2
+        ),
         route_fixture=fixture_route(html),
         resolver=lambda _: ["93.184.216.34"],
     )
@@ -338,7 +340,9 @@ def test_reading_signals_survives_a_navigation_after_load(tmp_path):
         route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
 
     service = BackgroundCollector(
-        Settings(_env_file=None, data_dir=tmp_path, browser_max_scrolls=1),
+        Settings(
+            _env_file=None, data_dir=tmp_path, browser_max_scrolls=1, browser_detail_wait_seconds=2
+        ),
         route_fixture=route,
         resolver=lambda _: ["93.184.216.34"],
     )

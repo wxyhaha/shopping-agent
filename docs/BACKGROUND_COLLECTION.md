@@ -73,6 +73,34 @@ uv run python -m scripts.browser_session jd
 - `(run_id, tool_call_id)` 哈希形成稳定操作标识。已保存快照的检查点重放直接读取同一快照，不再访问页面；浏览器已读但尚未提交时进程崩溃，恢复可能重新执行只读访问，不承诺网络请求恰好一次。
 - 操作上限按持久化尝试记录计数；同一调用不能换商品/参数。保存前在写事务核对运行状态，已取消的运行拒绝晚到结果。未保存的网络失败也记为一次尝试。
 
+## 接管用户已登录的浏览器（2026-11-02）
+
+淘宝、天猫对**自动化指纹**而非登录态设限：Playwright 自带的 Chromium 报告 `navigator.webdriver === true`，登录滑块会持续被拒（`error:unbWb1`）；用户自己启动的真实 Edge 报告 `false`，可正常访问。
+
+实现方式：
+
+- 用**独立配置目录**启动真实 Edge：`--user-data-dir=<数据目录>/edge-agent-profile --remote-debugging-port=9222`，与用户日常配置隔离。
+- 用户在该窗口**手动登录一次**，会话持久保存在该配置目录（实测重启后 `cookie2`/`unb`/`tracknick` 仍在）。
+- 后台采集用 `connect_over_cdp` 接管该实例，复用真实登录态。开关 `SHOPPING_AGENT_BROWSER_CDP_ENABLED`，地址 `SHOPPING_AGENT_BROWSER_CDP_URL`。
+
+接管时的边界：只操作本次新开的页面，结束只关该页面，**不关闭共享上下文，也不关闭用户的浏览器**；路由装在页面级（`page.route`）而非上下文级，避免影响用户其它标签页；打开商品页前先访问同站首页预热。
+
+**必须用可见模式**：`--headless=new` 的 UA 含 `HeadlessChrome`，淘宝据此逐步废除会话（`cookie2`/`unb` 消失）。窗口可移到屏幕外，但不能 headless。
+
+配置要随子进程传递：采集在独立 worker 中执行，worker 用 `Settings(_env_file=None, **payload["settings"])` 构造配置、不读 `.env`。新增开关若只改主进程，worker 仍用默认值，表现为"看起来支持、实际从未接管"。
+
+## 详情图读取的时序（2026-11-02）
+
+详情图是像素，只能由持有模型凭据的主进程识别；一次全读约一分钟，放不进采集时限。因此采集只产出快照，识别由调用方在落库后异步执行，用 `capture_snapshots.detail_enrichment` 记 `pending`/`done`，读取方等待该标记（≤90 秒且不超过运行剩余时间）。
+
+`select_product_variant` **不请求详情图识别**：切换规格改变的是选中项与价格，详情图不变。重复识别曾让单次切换耗时 117.6 秒，跳过后降到 20.6 秒。
+
+识别写入必须深拷贝：`enrich_detail_images` 原地修改字典并返回同一对象，SQLAlchemy 的 JSON 列不跟踪深层变更，直接赋值不会产生 `UPDATE`。
+
+## 待解决：天猫详情图区域读取不稳定
+
+见 [待解决问题](OPEN_ISSUE_TMALL_DETAIL_IMAGES.md)。要点：`readyState` 不能作为就绪判据（天猫 800ms 即 `complete`，此时文档仅 3643px，完整页面约 49250px）；等待时长与滚动次数均不影响成功率。
+
 ## 证据按需供给：全量识别不等于全量入模型（2026-11-01）
 
 详情图识别做得越全，模型侧上下文越大。早期把 78 条详情图字段与 94 条证据整份塞进每次工具返回，双商品任务累积到 **16 万字符**，模型 60 秒内无法应答；仅压缩冗余元数据后降到 8.9 万字符仍会失败。

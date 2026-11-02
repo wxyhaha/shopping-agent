@@ -443,6 +443,52 @@ class ResearchRuntime(SearchRuntimeMixin):
     # How long to wait for the follow-up detail-image read before reading evidence anyway.
     DETAIL_ENRICHMENT_WAIT_SECONDS = 90
 
+    def _enrich_detail_after_collection(self, snapshot_id: str) -> None:
+        """Read a freshly collected snapshot's detail artwork, then settle its marker.
+
+        Runs after the browser step so the collection deadline is not spent on vision calls.
+        Any failure still marks the snapshot done: the DOM fields remain valid, and a waiting
+        reader must never be blocked by a read that failed.
+        """
+        import copy
+
+        from app.background_collector import BrowserNetworkPolicy, public_addresses
+        from app.capture_urls import product_url_identity
+        from app.detail_enrich import enrich_detail_images
+
+        settings = get_settings()
+        try:
+            with self.sessions() as session:
+                record = session.get(CaptureSnapshot, snapshot_id)
+                if record is None:
+                    return
+                page_url = record.page_url
+                identity = product_url_identity(page_url)
+                policy = BrowserNetworkPolicy(
+                    public_addresses, trust_fake_ip_dns=settings.browser_trust_fake_ip_dns
+                )
+                # Copy first: the enrichment mutates in place and SQLAlchemy does not track
+                # deep changes on a JSON column, so the same reference would never be saved.
+                enriched = enrich_detail_images(
+                    copy.deepcopy(record.payload),
+                    settings,
+                    identity.platform if identity else "tmall",
+                    policy,
+                )
+                record.payload = enriched
+                record.detail_enrichment = "done"
+                session.commit()
+        except Exception:
+            # Settle the marker regardless, so the wait in _await_detail_enrichment ends.
+            try:
+                with self.sessions() as session:
+                    record = session.get(CaptureSnapshot, snapshot_id)
+                    if record is not None:
+                        record.detail_enrichment = "done"
+                        session.commit()
+            except Exception:
+                pass
+
     def _await_detail_enrichment(self, snapshot_id: str, deadline: float) -> None:
         """Block until a snapshot's detail-image read settles, or the wait expires.
 
@@ -782,8 +828,21 @@ class ResearchRuntime(SearchRuntimeMixin):
                     snapshot_id = persist_capture_snapshot(
                         task_id, payload.item_id, result.snapshot, Response(), session, key
                     ).id
-            except HTTPException:
-                raise AgentFailure("后台采集结果未通过快照校验；未保存不匹配的商品资料。") from None
+                    if result.detail_read_pending:
+                        # Mark it pending before the read starts, so a reader arriving during
+                        # the minute-long read waits instead of seeing half-filled evidence.
+                        record = session.get(CaptureSnapshot, snapshot_id)
+                        if record is not None:
+                            record.detail_enrichment = "pending"
+                        session.commit()
+            except HTTPException as exc:
+                # Keep the validator's own reason: without it a rejected capture only said
+                # "校验未通过", which hides which rule failed and makes the cause unfindable.
+                raise AgentFailure(f"后台采集结果未通过快照校验：{exc.detail}") from None
+            if result.detail_read_pending:
+                # The browser step is over; read the artwork now that the snapshot is stored.
+                self._enrich_detail_after_collection(snapshot_id)
+        self._await_detail_enrichment(snapshot_id, deadline)
         output, refs = self._read_evidence(task_id, payload.item_id, snapshot_id)
         capture_status = output.get("status")
         output.update(
@@ -1321,10 +1380,13 @@ class ResearchRuntime(SearchRuntimeMixin):
                 run = session.get(AgentRun, run_id)
                 if run and run.status in {"running", "queued"}:
                     run.status = "interrupted" if self.closing else "failed"
+                    # Keep the exception type and message. A generic string made every
+                    # unexpected failure look identical and hid the cause during debugging.
+                    summary = f"{type(exc).__name__}: {exc}".strip()[:300]
                     run.error = (
                         str(exc)
                         if isinstance(exc, AgentFailure)
-                        else "研究执行异常，记录已保留，可重试。"
+                        else f"研究执行异常，记录已保留，可重试。（{summary}）"
                     )
                     run.updated_at = utc_now()
                     session.commit()
