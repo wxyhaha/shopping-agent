@@ -102,7 +102,7 @@ function Popup() {
         pageUrl: active.url,
       }) as { ok?: boolean; started?: boolean; error?: string };
       if (!response?.ok || !response.started) throw new Error(response?.error || "详情图读取未能启动，请刷新商品页后重试。");
-      setDetailMessage("读取已在右下角浮窗启动；进度和“取消本次读取”都在浮窗内管理。保持商品页可见。");
+      setDetailMessage("已启动一趟采集：同次滚动会保存商品基础快照并识别详情图文字。进度和取消都在右下角浮窗管理，请保持商品页可见。");
     } catch (cause) {
       setDetailMessage(null);
       setDetailError(cause instanceof Error ? cause.message : "详情图读取失败，请稍后重试。");

@@ -26,7 +26,6 @@ interface DetailScreenshotFrame {
 
 type ExtensionRequest =
   | { type: "shopping-agent:list-tasks" }
-  | { type: "shopping-agent:detail-context"; taskId: string }
   | { type: "shopping-agent:detail-captures"; taskId: string; itemId: string; snapshotId: string }
   | {
       type: "shopping-agent:detail-upload";
@@ -53,7 +52,7 @@ type ExtensionRequest =
 
 type ExtensionResponse =
   | { ok: true; tasks: TaskSummary[]; backendUrl: string }
-  | { ok: true; taskId: string; taskTitle: string; captureStatus?: string; captureError?: string }
+  | { ok: true; taskId: string; taskTitle: string; itemId?: string; snapshotId?: string; captureStatus?: string; captureError?: string }
   | { ok: true; itemId: string; snapshotId: string }
   | { ok: true; captures: CaptureSnapshotRead[] }
   | { ok: true; snapshot_id: string; status: "queued" | "already_processed"; screenshot_count: number }
@@ -69,9 +68,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseRequest(value: unknown): ExtensionRequest | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   if (value.type === "shopping-agent:list-tasks") return { type: value.type };
-  if (value.type === "shopping-agent:detail-context" && typeof value.taskId === "string" && /^[0-9a-f-]{36}$/i.test(value.taskId)) {
-    return { type: value.type, taskId: value.taskId };
-  }
   if ((value.type === "shopping-agent:detail-captures" || value.type === "shopping-agent:detail-upload") &&
       typeof value.taskId === "string" && /^[0-9a-f-]{36}$/i.test(value.taskId) &&
       typeof value.itemId === "string" && /^[0-9a-f-]{36}$/i.test(value.itemId) &&
@@ -279,7 +275,7 @@ async function handleRequest(request: ExtensionRequest, sender: Browser.runtime.
       return { ok: true };
     }
 
-    if (request.type === "shopping-agent:detail-context" || request.type === "shopping-agent:detail-captures" || request.type === "shopping-agent:detail-upload") {
+    if (request.type === "shopping-agent:detail-captures" || request.type === "shopping-agent:detail-upload") {
       const host = page.hostname.toLowerCase();
       if (!sender.tab || sender.frameId !== 0 || !isSupportedProductUrl(page.href) ||
           !(host.endsWith(".taobao.com") || host.endsWith(".tmall.com"))) {
@@ -288,20 +284,11 @@ async function handleRequest(request: ExtensionRequest, sender: Browser.runtime.
       const taskId = request.taskId;
       const task = await requestJson<TaskRead>(backendUrl, `/tasks/${encodeURIComponent(taskId)}`);
       const item = task.items.find((candidate) => productKey(candidate.url) === productKey(page.href));
-      if (!item) throw new Error("当前任务中还没有这件商品，请先用右下角浮窗加入并采集。");
+      if (!item) throw new Error("所选任务中未找到当前商品，详情图读取已停止；请检查浮窗选择的目标任务。");
       const captures = await requestJson<CaptureSnapshotRead[]>(
         backendUrl,
         `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}/captures?limit=20`,
       );
-
-      if (request.type === "shopping-agent:detail-context") {
-        const snapshot = captures[0];
-        if (!snapshot) throw new Error("没有找到该商品的快照，请先保存一次基础采集。");
-        if (snapshot.detail_enrichment === "pending") {
-          throw new Error("该商品上一轮详情图识别仍在进行，请等它完成后再开始新的读取。");
-        }
-        return { ok: true, itemId: item.id, snapshotId: snapshot.id };
-      }
       if (item.id !== request.itemId) throw new Error("商品任务已变化，请刷新浮窗后重试。");
       if (!captures.some((capture) => capture.id === request.snapshotId)) {
         throw new Error("原始商品快照已不在最近记录中，后续截图批次已停止。");
@@ -411,12 +398,20 @@ async function handleRequest(request: ExtensionRequest, sender: Browser.runtime.
           body: JSON.stringify(request.capture),
         },
       );
-      return { ok: true, taskId, taskTitle: taskTitle || "商品比较", captureStatus: capture.status };
+      return {
+        ok: true,
+        taskId,
+        taskTitle: taskTitle || "商品比较",
+        itemId,
+        snapshotId: capture.id,
+        captureStatus: capture.status,
+      };
     } catch (cause) {
       return {
         ok: true,
         taskId,
         taskTitle: taskTitle || "商品比较",
+        itemId,
         captureError: cause instanceof Error ? cause.message : "快照保存失败。",
       };
     }
