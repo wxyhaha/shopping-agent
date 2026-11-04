@@ -1,33 +1,14 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { browser } from "wxt/browser";
-import { BACKEND_STORAGE_KEY, DEFAULT_BACKEND_URL, LAST_TASK_STORAGE_KEY, validateBackendUrl } from "../../src/extension/config";
+import { BACKEND_STORAGE_KEY, DEFAULT_BACKEND_URL, validateBackendUrl } from "../../src/extension/config";
 import { isSupportedMarketplaceUrl, isSupportedProductUrl } from "../../src/extension/page-rules";
-import type { components } from "../../src/api/schema";
 import "./popup.css";
-
-type TaskRead = components["schemas"]["TaskRead"];
-type CaptureSnapshotRead = components["schemas"]["CaptureSnapshotRead"];
 
 interface ActivePage {
   title: string;
   url: string;
 }
-
-interface ScreenshotFrame {
-  position: number;
-  scroll_y: number;
-  image_base64: string;
-}
-
-interface ScreenshotResponse {
-  ok: boolean;
-  error?: string;
-  reason?: "settled" | "cutoff_not_found" | "time_limit" | "step_limit" | "read_only";
-  screenshots?: ScreenshotFrame[];
-}
-
-const DETAIL_SCREENSHOT_BATCH_SIZE = 16;
 
 function productKey(value: string): string | null {
   try {
@@ -43,36 +24,6 @@ function productKey(value: string): string | null {
   }
 }
 
-async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers: {
-        Accept: "application/json",
-        ...(init.body ? { "Content-Type": "application/json" } : {}),
-        ...init.headers,
-      },
-      cache: "no-store",
-      signal: AbortSignal.timeout(30_000),
-    });
-  } catch {
-    throw new Error("无法连接本机服务，请确认后台正在运行。");
-  }
-  if (!response.ok) {
-    const body: unknown = await response.json().catch(() => null);
-    const detail = typeof body === "object" && body !== null && "detail" in body && typeof body.detail === "string"
-      ? body.detail
-      : "本机服务未能处理详情图。";
-    throw new Error(detail);
-  }
-  return (await response.json()) as T;
-}
-
-function wait(milliseconds: number) {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
-}
-
 function detectBrowser(): "chrome" | "edge" {
   return navigator.userAgent.includes("Edg/") ? "edge" : "chrome";
 }
@@ -86,6 +37,8 @@ function Popup() {
   const [opening, setOpening] = useState(false);
   const [capturingDetails, setCapturingDetails] = useState(false);
   const [detailMessage, setDetailMessage] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const autoStartRequested = useRef(false);
 
   useEffect(() => {
     void browser.storage.local.get(BACKEND_STORAGE_KEY).then((value) => {
@@ -94,7 +47,14 @@ function Popup() {
     });
     void browser.tabs.query({ active: true, currentWindow: true }).then((tabs) => {
       const active = tabs[0];
-      if (active?.url) setPage({ title: active.title ?? "", url: active.url });
+      if (!active?.url) return;
+      setPage({ title: active.title ?? "", url: active.url });
+      // Opening the toolbar popup is the explicit user gesture that grants activeTab.
+      // Start the floating-panel workflow now so the user does not need a second click.
+      if (active.id !== undefined && productKey(active.url) && !autoStartRequested.current) {
+        autoStartRequested.current = true;
+        void captureDetailImages(active);
+      }
     });
   }, []);
 
@@ -127,88 +87,25 @@ function Popup() {
     }
   }
 
-  async function captureDetailImages() {
-    setDetailMessage("正在确认当前商品已保存到任务…");
+  async function captureDetailImages(activeTab?: { id?: number; url?: string }) {
+    setDetailMessage("正在把详情图读取交给右下角浮窗…");
+    setDetailError(null);
     setError(null);
     setCapturingDetails(true);
     try {
-      const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-      const active = tabs[0];
+      const active = activeTab ?? (await browser.tabs.query({ active: true, currentWindow: true }))[0];
       if (!active?.id || !active.url || !productKey(active.url)) {
         throw new Error("请在淘宝或天猫商品详情页使用此功能；京东当前暂停。");
       }
-      const stored = await browser.storage.local.get([BACKEND_STORAGE_KEY, LAST_TASK_STORAGE_KEY]);
-      const backendUrl = validateBackendUrl(typeof stored[BACKEND_STORAGE_KEY] === "string"
-        ? stored[BACKEND_STORAGE_KEY] as string
-        : DEFAULT_BACKEND_URL);
-      const taskId = stored[LAST_TASK_STORAGE_KEY];
-      if (typeof taskId !== "string" || !taskId) {
-        throw new Error("请先在商品页悬浮助手中选择任务并保存当前商品。");
-      }
-      const task = await requestJson<TaskRead>(`${backendUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`);
-      const key = productKey(active.url);
-      const item = task.items.find((candidate) => productKey(candidate.url) === key);
-      if (!item) throw new Error("当前任务中还没有这件商品，请先用悬浮助手加入并采集。");
-      const captures = await requestJson<CaptureSnapshotRead[]>(
-        `${backendUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}/captures?limit=1`,
-      );
-      const snapshot = captures[0];
-      if (!snapshot) throw new Error("没有找到该商品的快照，请先保存一次基础采集。");
-
-      setDetailMessage("正在从当前浏览器截取已显示的详情图区域…");
-      const captured = await browser.tabs.sendMessage(active.id, {
-        type: "shopping-agent:capture-detail-screenshots",
+      const response = await browser.tabs.sendMessage(active.id, {
+        type: "shopping-agent:start-detail-reading",
         pageUrl: active.url,
-      }) as ScreenshotResponse;
-      if (!captured?.ok) throw new Error(captured?.error || "扩展没有取得详情图，请刷新商品页后重试。");
-      const screenshots = captured.screenshots ?? [];
-      if (!screenshots.length) {
-        throw new Error(captured.reason === "cutoff_not_found"
-          ? "已到达详情容器末端，但没有定位到详情图片，无法确认图片截止位置。"
-          : "当前读取范围没有找到已加载的详情图图片。");
-      }
-
-      let submittedCount = 0;
-      const batchCount = Math.ceil(screenshots.length / DETAIL_SCREENSHOT_BATCH_SIZE);
-      for (let offset = 0; offset < screenshots.length; offset += DETAIL_SCREENSHOT_BATCH_SIZE) {
-        const batch = screenshots.slice(offset, offset + DETAIL_SCREENSHOT_BATCH_SIZE);
-        const batchIndex = Math.floor(offset / DETAIL_SCREENSHOT_BATCH_SIZE) + 1;
-        setDetailMessage(`正在提交第 ${batchIndex}/${batchCount} 批详情图截图…`);
-        const result = await requestJson<{
-          snapshot_id: string;
-          status: "queued" | "already_processed";
-          screenshot_count: number;
-        }>(`${backendUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}` +
-          `/captures/${encodeURIComponent(snapshot.id)}/detail-screenshots`, {
-          method: "POST",
-          body: JSON.stringify({ page_url: active.url, screenshots: batch }),
-        });
-        submittedCount += result.screenshot_count;
-
-        if (offset + batch.length < screenshots.length && result.status === "queued") {
-          setDetailMessage(`第 ${batchIndex}/${batchCount} 批已提交，等待识别完成后继续…`);
-          while (true) {
-            await wait(1000);
-            const latest = await requestJson<CaptureSnapshotRead[]>(
-              `${backendUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}` +
-                `/captures?limit=20`,
-            );
-            const current = latest.find(candidate => candidate.id === snapshot.id);
-            if (!current) throw new Error("原始商品快照已不在最近记录中，后续截图批次未提交。");
-            if (current.detail_enrichment !== "pending") break;
-          }
-        }
-      }
-
-      const partial = captured.reason === "cutoff_not_found"
-        ? "已到达详情区域末端，但没有定位到最后一张图片，截止位置未确认。"
-        : captured.reason === "settled"
-          ? "已识别最后一张图片的位置并到达详情区域末端。"
-          : "本次读取没有确认详情图片截止位置。";
-      setDetailMessage(`已分 ${batchCount} 批提交 ${submittedCount} 段截图；最后一批由已配置的视觉模型异步识别，本地不保存原图。${partial}`);
+      }) as { ok?: boolean; started?: boolean; error?: string };
+      if (!response?.ok || !response.started) throw new Error(response?.error || "详情图读取未能启动，请刷新商品页后重试。");
+      setDetailMessage("读取已在右下角浮窗启动；进度和“取消本次读取”都在浮窗内管理。保持商品页可见。");
     } catch (cause) {
       setDetailMessage(null);
-      setError(cause instanceof Error ? cause.message : "详情图读取失败，请稍后重试。");
+      setDetailError(cause instanceof Error ? cause.message : "详情图读取失败，请稍后重试。");
     } finally {
       setCapturingDetails(false);
     }
@@ -221,7 +118,7 @@ function Popup() {
   const pageGuidance = !page
     ? "正在读取当前页面…"
     : productKey(page.url)
-      ? "淘宝/天猫商品页已就绪。可用下方按钮读取详情图文字。"
+      ? "本次工具栏点击会自动启动详情图读取；进度和取消操作都在右下角浮窗。"
       : isSupportedProductUrl(page.url)
         ? "京东访问当前暂停；淘宝/天猫商品页可使用详情图读取。"
       : isSupportedMarketplaceUrl(page.url)
@@ -244,14 +141,13 @@ function Popup() {
 
       <div className="capture-guidance" role="status">{pageGuidance}</div>
 
-      <button
-        className="detail-capture-button"
-        onClick={() => void captureDetailImages()}
-        disabled={capturingDetails || !productKey(page?.url ?? "")}
-      >
-        {capturingDetails ? "正在读取详情图…" : "读取详情图文字"}
-      </button>
       {detailMessage && <div className="detail-capture-message" role="status">{detailMessage}</div>}
+      {detailError && <div className="popup-error" role="alert">
+        {detailError}
+        <button className="retry-capture-button" onClick={() => void captureDetailImages()} disabled={capturingDetails}>
+          {capturingDetails ? "正在启动…" : "重试详情图读取"}
+        </button>
+      </div>}
 
       <button className="workspace-button" onClick={() => void openWorkspace()} disabled={opening}>
         {opening ? "正在打开…" : "打开任务工作台"}<span aria-hidden="true">→</span>

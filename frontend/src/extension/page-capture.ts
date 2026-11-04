@@ -6,6 +6,18 @@ import { inspectVariants } from "./variant-controller";
 const DETAIL_SELECTORS = ["#J_DivItemDesc", "#description", "#detailContent", "[class*='descV8']", "[class*='detail-content']", "#detail"];
 const SCREENSHOT_INTERVAL_MS = 650;
 
+export function isSamePageDocumentAddress(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    leftUrl.hash = "";
+    rightUrl.hash = "";
+    return leftUrl.href === rightUrl.href;
+  } catch {
+    return false;
+  }
+}
+
 export interface DetailScreenshotSegment {
   position: number;
   scroll_y: number;
@@ -156,10 +168,18 @@ async function captureProduct(
   const screenshots: DetailScreenshotSegment[] = [];
   let lastScreenshotAt = 0;
   let interrupted = false;
+  let originRestored = false;
+  const restoreOrigin = () => {
+    if (originRestored || !options.scroll || (interrupted && !options.signal?.aborted) ||
+        !isSamePageDocumentAddress(location.href, pageUrl) || document.visibilityState !== "visible") return;
+    view.scrollTo({ left: origin.x, top: origin.y, behavior: "instant" });
+    originRestored = true;
+  };
   const interrupt = (event: Event) => {
     // Closed-shadow UI events are retargeted to the extension's host. Double clicks on
     // its disabled submit button must not be mistaken for a new marketplace interaction.
-    if (event.target instanceof Element && event.target.closest("shopping-agent-product-assistant")) return;
+    const assistantHost = document.querySelector("shopping-agent-product-assistant");
+    if (assistantHost && event.composedPath().includes(assistantHost)) return;
     interrupted = true;
   };
   const interruptKey = (event: KeyboardEvent) => {
@@ -167,7 +187,7 @@ async function captureProduct(
   };
   const check = () => {
     if (options.signal?.aborted) throw new Error("采集已取消，未提交商品快照。");
-    if (location.href !== pageUrl) throw new Error("商品页已变化，本次快照未提交，请在当前商品页重试。");
+    if (!isSamePageDocumentAddress(location.href, pageUrl)) throw new Error("商品页已变化，本次快照未提交，请在当前商品页重试。");
     if (interrupted) throw new Error("检测到页面操作，采集已停止，请选好规格后重新读取。");
     if (options.scroll && document.visibilityState !== "visible") throw new Error("商品页已切到后台，采集已停止，请回到此页重新读取。");
     if (selection() !== initialSelection) throw new Error("选中规格在采集期间发生变化，请等待价格更新后重新读取。");
@@ -233,11 +253,7 @@ async function captureProduct(
       },
       ...(captureViewport ? { captureViewport } : {}),
       advance: () => view.scrollTo({ top: view.scrollY + Math.max(200, view.innerHeight * 0.75), behavior: "instant" }),
-      restore: () => {
-        if (options.scroll && !interrupted && location.href === pageUrl && document.visibilityState === "visible") {
-          view.scrollTo({ left: origin.x, top: origin.y, behavior: "instant" });
-        }
-      },
+      restore: restoreOrigin,
     }, options);
     check();
     status("正在核对选中规格和价格是否稳定…");
@@ -256,6 +272,8 @@ async function captureProduct(
       reason: preparation.reason,
     };
   } finally {
+    // Also restore when cancellation or an error happens before prepareDetails starts.
+    restoreOrigin();
     view.removeEventListener("wheel", interrupt, true);
     view.removeEventListener("touchstart", interrupt, true);
     view.removeEventListener("pointerdown", interrupt, true);

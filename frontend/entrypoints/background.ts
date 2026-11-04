@@ -18,8 +18,24 @@ type CaptureSnapshotRead = components["schemas"]["CaptureSnapshotRead"];
 type BrowserClaim = components["schemas"]["BrowserClaimResponse"];
 type BrowserCaptureResult = components["schemas"]["BrowserCaptureResult"];
 
+interface DetailScreenshotFrame {
+  position: number;
+  scroll_y: number;
+  image_base64: string;
+}
+
 type ExtensionRequest =
   | { type: "shopping-agent:list-tasks" }
+  | { type: "shopping-agent:detail-context"; taskId: string }
+  | { type: "shopping-agent:detail-captures"; taskId: string; itemId: string; snapshotId: string }
+  | {
+      type: "shopping-agent:detail-upload";
+      taskId: string;
+      itemId: string;
+      snapshotId: string;
+      pageUrl: string;
+      screenshots: DetailScreenshotFrame[];
+    }
   | { type: "shopping-agent:claim-capture"; url: string }
   | { type: "shopping-agent:complete-capture"; url: string; jobId: string; leaseToken: string; capture: CaptureSnapshotSubmit }
   | { type: "shopping-agent:fail-capture"; url: string; jobId: string; leaseToken: string; errorCode: "page_changed" | "capture_failed"; detail?: string }
@@ -38,6 +54,9 @@ type ExtensionRequest =
 type ExtensionResponse =
   | { ok: true; tasks: TaskSummary[]; backendUrl: string }
   | { ok: true; taskId: string; taskTitle: string; captureStatus?: string; captureError?: string }
+  | { ok: true; itemId: string; snapshotId: string }
+  | { ok: true; captures: CaptureSnapshotRead[] }
+  | { ok: true; snapshot_id: string; status: "queued" | "already_processed"; screenshot_count: number }
   | { ok: true }
   | { ok: true; job: BrowserClaim["job"] }
   | { ok: true; snapshotId: string | null }
@@ -50,6 +69,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function parseRequest(value: unknown): ExtensionRequest | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   if (value.type === "shopping-agent:list-tasks") return { type: value.type };
+  if (value.type === "shopping-agent:detail-context" && typeof value.taskId === "string" && /^[0-9a-f-]{36}$/i.test(value.taskId)) {
+    return { type: value.type, taskId: value.taskId };
+  }
+  if ((value.type === "shopping-agent:detail-captures" || value.type === "shopping-agent:detail-upload") &&
+      typeof value.taskId === "string" && /^[0-9a-f-]{36}$/i.test(value.taskId) &&
+      typeof value.itemId === "string" && /^[0-9a-f-]{36}$/i.test(value.itemId) &&
+      typeof value.snapshotId === "string" && /^[0-9a-f-]{36}$/i.test(value.snapshotId)) {
+    const shared = { taskId: value.taskId, itemId: value.itemId, snapshotId: value.snapshotId };
+    if (value.type === "shopping-agent:detail-captures") return { type: value.type, ...shared };
+    if (typeof value.pageUrl !== "string" || !Array.isArray(value.screenshots) ||
+        value.screenshots.length < 1 || value.screenshots.length > 16) return null;
+    const screenshots: DetailScreenshotFrame[] = [];
+    for (const frame of value.screenshots) {
+      if (!isRecord(frame) || !Number.isInteger(frame.position) || Number(frame.position) < 1 ||
+          !Number.isInteger(frame.scroll_y) || Number(frame.scroll_y) < 0 ||
+          typeof frame.image_base64 !== "string" || frame.image_base64.length < 1 || frame.image_base64.length > 650_000) {
+        return null;
+      }
+      screenshots.push({ position: Number(frame.position), scroll_y: Number(frame.scroll_y), image_base64: frame.image_base64 });
+    }
+    if (new Set(screenshots.map((frame) => frame.position)).size !== screenshots.length) return null;
+    return { type: value.type, ...shared, pageUrl: value.pageUrl, screenshots };
+  }
   if (value.type === "shopping-agent:claim-capture" && typeof value.url === "string") {
     return { type: value.type, url: value.url };
   }
@@ -123,13 +165,14 @@ async function captureVisibleProductTab(sender: Browser.runtime.MessageSender): 
     throw new Error("详情截图目前只支持淘宝和天猫商品页。");
   }
   const activeTabs = await browser.tabs.query({ active: true, windowId });
-  if (activeTabs[0]?.id !== tabId || !activeTabs[0].url || !samePage(new URL(activeTabs[0].url), page)) {
+  const activeTab = activeTabs[0];
+  if (activeTab?.id !== tabId || (activeTab.url && productKey(activeTab.url) !== productKey(page.href))) {
     throw new Error("商品页已切换，详情截图已停止。");
   }
   try {
     return await browser.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 88 });
   } catch {
-    throw new Error("浏览器没有授予当前页面截图权限。请点击扩展工具栏图标后重试。");
+    throw new Error("浏览器还没有授予当前页面截图权限。请点击 Shopping Agent 工具栏图标启动读取；进度仍由右下角浮窗显示。");
   }
 }
 
@@ -234,6 +277,48 @@ async function handleRequest(request: ExtensionRequest, sender: Browser.runtime.
       if (!/^[0-9a-f-]{36}$/i.test(request.taskId)) throw new Error("任务编号无效，请重新选择任务。");
       await browser.tabs.create({ url: `${backendUrl}/tasks/${encodeURIComponent(request.taskId)}` });
       return { ok: true };
+    }
+
+    if (request.type === "shopping-agent:detail-context" || request.type === "shopping-agent:detail-captures" || request.type === "shopping-agent:detail-upload") {
+      const host = page.hostname.toLowerCase();
+      if (!sender.tab || sender.frameId !== 0 || !isSupportedProductUrl(page.href) ||
+          !(host.endsWith(".taobao.com") || host.endsWith(".tmall.com"))) {
+        throw new Error("详情图读取只接受淘宝或天猫商品页的请求。京东当前暂停。");
+      }
+      const taskId = request.taskId;
+      const task = await requestJson<TaskRead>(backendUrl, `/tasks/${encodeURIComponent(taskId)}`);
+      const item = task.items.find((candidate) => productKey(candidate.url) === productKey(page.href));
+      if (!item) throw new Error("当前任务中还没有这件商品，请先用右下角浮窗加入并采集。");
+      const captures = await requestJson<CaptureSnapshotRead[]>(
+        backendUrl,
+        `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}/captures?limit=20`,
+      );
+
+      if (request.type === "shopping-agent:detail-context") {
+        const snapshot = captures[0];
+        if (!snapshot) throw new Error("没有找到该商品的快照，请先保存一次基础采集。");
+        if (snapshot.detail_enrichment === "pending") {
+          throw new Error("该商品上一轮详情图识别仍在进行，请等它完成后再开始新的读取。");
+        }
+        return { ok: true, itemId: item.id, snapshotId: snapshot.id };
+      }
+      if (item.id !== request.itemId) throw new Error("商品任务已变化，请刷新浮窗后重试。");
+      if (!captures.some((capture) => capture.id === request.snapshotId)) {
+        throw new Error("原始商品快照已不在最近记录中，后续截图批次已停止。");
+      }
+      if (request.type === "shopping-agent:detail-captures") return { ok: true, captures };
+
+      const currentPage = new URL(request.pageUrl);
+      if (currentPage.username || currentPage.password || productKey(page.href) !== productKey(currentPage.href)) {
+        throw new Error("商品页已变化，详情截图已停止。");
+      }
+      const result = await requestJson<components["schemas"]["DetailScreenshotUploadResponse"]>(backendUrl,
+        `/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(item.id)}` +
+          `/captures/${encodeURIComponent(request.snapshotId)}/detail-screenshots`, {
+          method: "POST",
+          body: JSON.stringify({ page_url: currentPage.href, screenshots: request.screenshots }),
+        });
+      return { ok: true, ...result };
     }
 
     if (["shopping-agent:claim-capture", "shopping-agent:complete-capture", "shopping-agent:fail-capture"].includes(request.type)) {

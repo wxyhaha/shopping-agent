@@ -3,7 +3,7 @@ import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root";
 import type { ContentScriptContext } from "wxt/utils/content-script-context";
 import type { components } from "../src/api/schema";
 import { collectCurrentProductSnapshot, getCurrentProductTitle } from "../src/extension/capture-adapters";
-import { captureOpenedProduct, captureOpenedProductWithScreenshots } from "../src/extension/page-capture";
+import { captureOpenedProduct, captureOpenedProductWithScreenshots, isSamePageDocumentAddress } from "../src/extension/page-capture";
 import { captureSummary } from "../src/extension/capture-preparation";
 import { pollCaptureBridge } from "../src/extension/capture-bridge";
 import { LAST_TASK_STORAGE_KEY } from "../src/extension/config";
@@ -25,7 +25,8 @@ const OVERLAY_CSS = `
     font: 14px/1.45 Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
   }
   .sa-panel {
-    overflow: hidden;
+    max-height: calc(100vh - 124px);
+    overflow: auto;
     border: 1px solid #dce5dc;
     border-radius: 14px;
     background: rgba(255, 255, 255, .98);
@@ -86,6 +87,9 @@ const OVERLAY_CSS = `
   .sa-data-preview-copy strong { color: #56675a; font-size: 11px; font-weight: 650; }
   .sa-data-preview-copy span { margin-top: 3px; line-height: 1.45; }
   .sa-preview-refresh { flex: 0 0 auto; padding: 0; border: 0; color: #55745b; background: transparent; cursor: pointer; font: inherit; font-size: 11px; }
+  .sa-detail-action { padding: 0 15px 10px; }
+  .sa-cancel-capture { display: block; min-height: 30px; margin: 4px auto 0; color: #9d4138; font-size: 12px; text-decoration: underline; }
+  .sa-cancel-capture[hidden] { display: none; }
   .sa-bridge-connection { padding: 0 15px 10px; color: #68776c; font-size: 11px; overflow-wrap: anywhere; }
   .sa-bridge-connection[data-error="true"] { color: #a36a24; }
   .sa-form { padding: 0 15px 12px; }
@@ -119,6 +123,7 @@ const OVERLAY_CSS = `
     font: inherit;
     font-weight: 650;
   }
+  .sa-detail-read-button[hidden] { display: none; }
   .sa-button:hover:not(:disabled) { background: #3d6045; }
   .sa-button:disabled { border-color: #c8d1c9; color: #879287; background: #e9ede9; cursor: not-allowed; }
   .sa-status { min-height: 21px; margin-top: 7px; color: #6c7c6f; font-size: 12px; }
@@ -213,12 +218,17 @@ function mountOverlay(container: HTMLElement): HTMLElement {
         <div class="sa-data-preview-copy"><strong>采集预览</strong><span class="sa-data-preview-text">进入商品详情页后显示可识别信息。</span></div>
         <button class="sa-preview-refresh" type="button">读取预览</button>
       </div>
+      <div class="sa-detail-action">
+        <button class="sa-button sa-detail-read-button" type="button" hidden>
+          <span class="sa-spinner">⋯ </span><span class="sa-detail-read-text">读取详情图文字</span>
+        </button>
+        <button class="sa-link-button sa-cancel-capture" type="button" hidden>取消本次读取</button>
+      </div>
       <div class="sa-bridge-connection" role="status">自动采集通道：正在连接…</div>
       <div class="sa-form">
         <label class="sa-label" for="sa-task-select">加入到</label>
         <select id="sa-task-select" class="sa-select" aria-label="选择比较任务"></select>
-        <button class="sa-button" type="button" disabled><span class="sa-spinner">⋯ </span><span class="sa-button-text">正在连接本机服务…</span></button>
-        <button class="sa-link-button sa-cancel-capture" type="button" hidden>取消本次读取</button>
+        <button class="sa-button sa-add-button" type="button" disabled><span class="sa-spinner">⋯ </span><span class="sa-button-text">正在连接本机服务…</span></button>
         <div class="sa-status" role="status" aria-live="polite"></div>
       </div>
       <footer class="sa-footer">
@@ -240,14 +250,20 @@ async function mountProductAssistant(
   const pageTitleElement = element<HTMLElement>(widget, ".sa-preview-title");
   const capturePreviewElement = element<HTMLElement>(widget, ".sa-data-preview-text");
   const bridgeConnection = element<HTMLElement>(widget, ".sa-bridge-connection");
-  const addButton = element<HTMLButtonElement>(widget, ".sa-button");
+  const addButton = element<HTMLButtonElement>(widget, ".sa-add-button");
   const addButtonText = element<HTMLSpanElement>(widget, ".sa-button-text");
+  const detailReadButton = element<HTMLButtonElement>(widget, ".sa-detail-read-button");
+  const detailReadButtonText = element<HTMLSpanElement>(widget, ".sa-detail-read-text");
   const statusElement = element<HTMLDivElement>(widget, ".sa-status");
   const openTaskButton = element<HTMLButtonElement>(widget, ".sa-open-task");
   const collapsedButton = element<HTMLButtonElement>(widget, ".sa-collapsed");
   const cancelCaptureButton = element<HTMLButtonElement>(widget, ".sa-cancel-capture");
   let captureAbort: AbortController | null = null;
-  cancelCaptureButton.addEventListener("click", () => captureAbort?.abort());
+  cancelCaptureButton.addEventListener("click", () => {
+    if (!captureAbort || captureAbort.signal.aborted) return;
+    captureAbort.abort();
+    setStatus("正在停止当前读取…", "warning");
+  });
 
   let tasks: TaskSummary[] = [];
   let selectedTaskId = "new";
@@ -293,12 +309,22 @@ async function mountProductAssistant(
     } finally {
       bridgeBusy = false;
       addButton.disabled = busy || !isSupportedProductUrl(location.href) || !tasksLoaded;
+      detailReadButton.disabled = busy || !tasksLoaded || !isSupportedDetailImagePage(location.href);
     }
   }
 
   function setStatus(message: string, tone: "normal" | "error" | "success" | "warning" = "normal"): void {
     statusElement.textContent = message;
     statusElement.dataset.tone = tone === "normal" ? "" : tone;
+  }
+
+  function isSupportedDetailImagePage(url: string): boolean {
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return isSupportedProductUrl(url) && (host.endsWith(".taobao.com") || host.endsWith(".tmall.com"));
+    } catch {
+      return false;
+    }
   }
 
   function selectedTask(): TaskSummary | undefined {
@@ -338,6 +364,9 @@ async function mountProductAssistant(
     }
     const isMarketplace = isSupportedMarketplaceUrl(url);
     const isProduct = isMarketplace && isSupportedProductUrl(url);
+    detailReadButton.hidden = !isSupportedDetailImagePage(url);
+    detailReadButton.disabled = busy || bridgeBusy || !tasksLoaded || !isSupportedDetailImagePage(url);
+    detailReadButtonText.textContent = busy && detailReadButton.dataset.reading === "true" ? "正在读取详情图…" : "读取详情图文字";
     pageTitleElement.textContent = (isProduct ? getCurrentProductTitle(document, document.title) : document.title.trim()) || "当前商品页面";
     renderCapturePreview();
     addButton.disabled = busy || bridgeBusy || !isProduct || !tasksLoaded;
@@ -369,6 +398,7 @@ async function mountProductAssistant(
   async function loadTasks(): Promise<void> {
     tasksLoaded = false;
     addButton.disabled = true;
+    detailReadButton.disabled = true;
     setStatus("正在连接本机服务…");
     try {
       const response = (await browser.runtime.sendMessage({ type: "shopping-agent:list-tasks" })) as ListTasksResponse;
@@ -387,6 +417,7 @@ async function mountProductAssistant(
     } catch (cause) {
       tasksLoaded = false;
       addButton.disabled = true;
+      detailReadButton.disabled = true;
       setStatus(cause instanceof Error ? cause.message : "无法连接本机服务，请重试。", "error");
     }
   }
@@ -412,6 +443,7 @@ async function mountProductAssistant(
     busy = true;
     captureAbort = new AbortController();
     addButton.disabled = true;
+    detailReadButton.disabled = true;
     taskSelect.disabled = true;
     cancelCaptureButton.hidden = false;
     widget.classList.add("is-busy");
@@ -431,10 +463,186 @@ async function mountProductAssistant(
       cancelCaptureButton.hidden = true;
       widget.classList.remove("is-busy");
       addButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedProductUrl(location.href);
+      detailReadButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedDetailImagePage(location.href);
     }
   });
-  element<HTMLButtonElement>(widget, ".sa-collapse").addEventListener("click", () => widget.classList.add("is-collapsed"));
+  detailReadButton.addEventListener("click", () => void readDetailImages());
+  element<HTMLButtonElement>(widget, ".sa-collapse").addEventListener("click", () => {
+    if (!busy) widget.classList.add("is-collapsed");
+  });
   collapsedButton.addEventListener("click", () => widget.classList.remove("is-collapsed"));
+
+  function assertNotCancelled(signal: AbortSignal): void {
+    if (signal.aborted) throw new Error("DETAIL_READ_CANCELLED");
+  }
+
+  function waitForDetailPoll(milliseconds: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, milliseconds);
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(new Error("DETAIL_READ_CANCELLED"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  async function readDetailImages(): Promise<void> {
+    const url = location.href;
+    const initialScroll = { left: window.scrollX, top: window.scrollY };
+    if (busy || bridgeBusy) return;
+    if (!isSupportedDetailImagePage(url)) {
+      setStatus("详情图文字读取目前支持淘宝和天猫商品页。", "warning");
+      return;
+    }
+    const taskId = taskSelect.value;
+    if (!taskId || taskId === "new") {
+      setStatus("请先选择一个已保存当前商品的任务，再读取详情图文字。", "warning");
+      return;
+    }
+
+    busy = true;
+    const controller = new AbortController();
+    captureAbort = controller;
+    detailReadButton.dataset.reading = "true";
+    detailReadButton.disabled = true;
+    detailReadButtonText.textContent = "正在读取详情图…";
+    addButton.disabled = true;
+    taskSelect.disabled = true;
+    cancelCaptureButton.hidden = false;
+    widget.classList.add("is-busy");
+    let submittedCount = 0;
+    let inFlightBatchSize = 0;
+
+    try {
+      setStatus("正在确认当前商品的已保存快照…");
+      const context = await browser.runtime.sendMessage({
+        type: "shopping-agent:detail-context",
+        taskId,
+      }) as { ok?: boolean; itemId?: string; snapshotId?: string; error?: string };
+      if (!context?.ok || !context.itemId || !context.snapshotId) {
+        throw new Error(context?.error || "没有找到当前商品的已保存快照。");
+      }
+      assertNotCancelled(controller.signal);
+
+      setStatus("正在滚动并截取详情图区域，完成后会逐批识别…");
+      const { result } = await captureOpenedProductWithScreenshots(url, {
+        scroll: true,
+        signal: controller.signal,
+        untilCutoff: true,
+        status: setStatus,
+        captureVisibleTab: async () => {
+          const response = await browser.runtime.sendMessage({
+            type: "shopping-agent:capture-visible-tab",
+          }) as { ok?: boolean; screenshot_url?: string; error?: string };
+          if (!response?.ok || !response.screenshot_url) {
+            throw new Error(response?.error || "无法截取当前详情图区域。");
+          }
+          return response.screenshot_url;
+        },
+      });
+      if (!isSamePageDocumentAddress(location.href, url)) throw new Error("商品页已变化，详情截图已停止。");
+      const screenshots = result.screenshots;
+      if (!screenshots.length) {
+        throw new Error(result.reason === "cutoff_not_found"
+          ? "已到达详情容器末端，但没有定位到详情图片，无法确认图片截止位置。"
+          : "当前读取范围没有找到已加载的详情图图片。");
+      }
+
+      const batchSize = 16;
+      const batchCount = Math.ceil(screenshots.length / batchSize);
+      for (let offset = 0; offset < screenshots.length; offset += batchSize) {
+        assertNotCancelled(controller.signal);
+        if (!isSamePageDocumentAddress(location.href, url)) throw new Error("商品页已变化，详情截图已停止。");
+        const batch = screenshots.slice(offset, offset + batchSize);
+        const batchIndex = Math.floor(offset / batchSize) + 1;
+        setStatus(`正在提交第 ${batchIndex}/${batchCount} 批截图…`);
+        inFlightBatchSize = batch.length;
+        const uploaded = await browser.runtime.sendMessage({
+          type: "shopping-agent:detail-upload",
+          taskId,
+          itemId: context.itemId,
+          snapshotId: context.snapshotId,
+          pageUrl: url,
+          screenshots: batch,
+        }) as { ok?: boolean; snapshot_id?: string; status?: "queued" | "already_processed"; screenshot_count?: number; error?: string };
+        if (!uploaded?.ok || typeof uploaded.screenshot_count !== "number") {
+          throw new Error(uploaded?.error || "本机服务未能接收本批截图。");
+        }
+        submittedCount += uploaded.screenshot_count;
+        inFlightBatchSize = 0;
+        assertNotCancelled(controller.signal);
+
+        if (uploaded.status === "queued") {
+          const isLastBatch = offset + batch.length >= screenshots.length;
+          setStatus(isLastBatch
+            ? `最后一批已提交，正在等待详情图识别完成…`
+            : `第 ${batchIndex}/${batchCount} 批已提交，等待识别完成后继续…`);
+          while (true) {
+            await waitForDetailPoll(1000, controller.signal);
+            assertNotCancelled(controller.signal);
+            const latest = await browser.runtime.sendMessage({
+              type: "shopping-agent:detail-captures",
+              taskId,
+              itemId: context.itemId,
+              snapshotId: context.snapshotId,
+            }) as { ok?: boolean; captures?: components["schemas"]["CaptureSnapshotRead"][]; error?: string };
+            if (!latest?.ok || !Array.isArray(latest.captures)) {
+              throw new Error(latest?.error || "无法确认详情图识别状态，已停止后续批次。");
+            }
+            const current = latest.captures.find((capture) => capture.id === context.snapshotId);
+            if (!current) throw new Error("原始商品快照已不在最近记录中，后续截图批次已停止。");
+            if (current.detail_enrichment !== "pending") break;
+          }
+        }
+      }
+
+      assertNotCancelled(controller.signal);
+      const partial = result.reason === "cutoff_not_found"
+        ? "已到达详情区域末端，但没有定位到最后一张图片，截止位置未确认。"
+        : result.reason === "settled"
+          ? "已识别最后一张图片的位置并到达详情区域末端。"
+          : "本次读取没有确认详情图片截止位置。";
+      setStatus(`已分 ${batchCount} 批提交 ${submittedCount} 段截图，详情图识别已完成。本地不保存原图。${partial}`,
+        result.reason === "settled" ? "success" : "warning");
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "详情图读取失败。";
+      if (controller.signal.aborted || message === "DETAIL_READ_CANCELLED") {
+        const confirmed = submittedCount > 0 ? `已确认接收 ${submittedCount} 段截图` : "此前没有确认接收截图";
+        const uncertain = inFlightBatchSize > 0
+          ? `；取消时正在发送的 ${inFlightBatchSize} 段可能已被服务端接收`
+          : "";
+        const retained = submittedCount > 0 ? "，其后台识别会继续" : "";
+        setStatus(`已取消本次读取；${confirmed}${uncertain}${retained}，未开始的后续批次已停止。`, "warning");
+      } else {
+        setStatus(inFlightBatchSize > 0
+          ? `${message} 当前 ${inFlightBatchSize} 段截图的提交状态未知，请先检查工作台再重试。`
+          : message, "error");
+      }
+    } finally {
+      busy = false;
+      captureAbort = null;
+      taskSelect.disabled = false;
+      cancelCaptureButton.hidden = true;
+      detailReadButton.dataset.reading = "false";
+      detailReadButtonText.textContent = "读取详情图文字";
+      detailReadButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedDetailImagePage(location.href);
+      widget.classList.remove("is-busy");
+      addButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedProductUrl(location.href);
+      if (controller.signal.aborted) {
+        const restoreInitialScroll = () => {
+          if (document.visibilityState !== "visible" || !isSamePageDocumentAddress(location.href, url)) return;
+          window.scrollTo({ ...initialScroll, behavior: "instant" });
+        };
+        restoreInitialScroll();
+        window.requestAnimationFrame(restoreInitialScroll);
+      }
+    }
+  }
 
   addButton.addEventListener("click", async () => {
     const url = location.href;
@@ -446,6 +654,7 @@ async function mountProductAssistant(
     captureAbort = new AbortController();
     widget.classList.add("is-busy");
     addButton.disabled = true;
+    detailReadButton.disabled = true;
     taskSelect.disabled = true;
     cancelCaptureButton.hidden = false;
     openTaskButton.hidden = true;
@@ -510,6 +719,7 @@ async function mountProductAssistant(
       cancelCaptureButton.hidden = true;
       widget.classList.remove("is-busy");
       addButton.disabled = bridgeBusy || !isSupportedProductUrl(location.href) || !tasksLoaded;
+      detailReadButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedDetailImagePage(location.href);
     }
   });
 
@@ -533,55 +743,24 @@ async function mountProductAssistant(
   // a timer in this page is frozen along with its tab. The local interval remains as a fast
   // path while the tab is in front.
   browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
-    const request = message as { type?: string; url?: string } | null;
-    if (request?.type === "shopping-agent:capture-detail-screenshots") {
+    const request = message as { type?: string; pageUrl?: string; url?: string } | null;
+    if (request?.type === "shopping-agent:start-detail-reading") {
       const senderUrl = sender.url ?? "";
       if (sender.id !== browser.runtime.id || !senderUrl.startsWith(browser.runtime.getURL(""))) {
-        sendResponse({ ok: false, error: "请从扩展工具栏启动详情图读取。" });
+        sendResponse({ ok: false, error: "请从 Shopping Agent 工具栏启动详情图读取。" });
         return;
       }
-      if (busy || bridgeBusy || !isSupportedProductUrl(location.href)) {
+      if (!request.pageUrl || !isSamePageDocumentAddress(request.pageUrl, location.href)) {
+        sendResponse({ ok: false, error: "商品页已变化，请重新从工具栏启动。" });
+        return;
+      }
+      if (busy || bridgeBusy || !isSupportedDetailImagePage(location.href)) {
         sendResponse({ ok: false, error: "当前页面正在处理其他采集，或不是支持的商品页。" });
         return;
       }
-      busy = true;
-      captureAbort = new AbortController();
-      addButton.disabled = true;
-      taskSelect.disabled = true;
-      cancelCaptureButton.hidden = false;
-      widget.classList.add("is-busy");
-      void captureOpenedProductWithScreenshots(location.href, {
-        scroll: true,
-        signal: captureAbort.signal,
-        untilCutoff: true,
-        status: setStatus,
-        captureVisibleTab: async () => {
-          const result = await browser.runtime.sendMessage({ type: "shopping-agent:capture-visible-tab" }) as {
-            ok?: boolean; screenshot_url?: string; error?: string;
-          };
-          if (!result?.ok || !result.screenshot_url) throw new Error(result?.error || "无法截取当前详情图区域。");
-          return result.screenshot_url;
-        },
-      }).then(({ result }) => {
-        if (location.href !== (message as { pageUrl?: string }).pageUrl) {
-          throw new Error("商品页已变化，详情截图未提交。");
-        }
-        sendResponse({
-          ok: true,
-          screenshots: result.screenshots,
-          reason: result.reason,
-        });
-      }).catch((cause: unknown) => {
-        sendResponse({ ok: false, error: cause instanceof Error ? cause.message : "详情图读取失败。" });
-      }).finally(() => {
-        busy = false;
-        captureAbort = null;
-        taskSelect.disabled = false;
-        cancelCaptureButton.hidden = true;
-        widget.classList.remove("is-busy");
-        addButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedProductUrl(location.href);
-      });
-      return true;
+      sendResponse({ ok: true, started: true });
+      void readDetailImages();
+      return;
     }
     if (request?.type !== "shopping-agent:poll-capture-now") return;
     if (request.url && request.url !== location.href) {
