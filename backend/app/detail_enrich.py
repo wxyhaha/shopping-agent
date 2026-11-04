@@ -8,9 +8,10 @@ the same thing regardless of which browser produced it.
 
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from app.detail_dedupe import dedupe_detail_images, dedupe_texts
+from app.detail_dedupe import dedupe_detail_images
 from app.detail_vision import BATCH_SIZE, chunked, read_detail_batch
 from app.image_fetch import fetch_image
 
@@ -46,19 +47,48 @@ def detail_image_indexes(snapshot: dict) -> set[str]:
     }
 
 
-def _add_items(snapshot: dict, kind: str, lines: list[str]) -> None:
+def _add_items(snapshot: dict, kind: str, readings: list[tuple[str, list[str]]]) -> None:
     """Record recognised detail-image text as its own observation set.
 
     Each kind stays under its own path so none can be mistaken for the measured
     specification table (``specs.*``), which comes from the DOM. The user-facing label is a
     single "详情图" tag; the source URL stays in the evidence locator for traceability.
     """
-    evidence_ids = [
-        entry["evidence_id"]
-        for entry in snapshot.get("evidence", [])
-        if entry.get("source") == "detail_image_vision"
-    ][:20]
-    for position, line in enumerate(lines, start=1):
+    # Deduplicate text while retaining all its actual source panels. A late panel must not
+    # inherit the first twenty panels' references simply because those were read earlier.
+    unique: dict[str, tuple[str, list[str]]] = {}
+    fields = snapshot.setdefault("fields", [])
+    existing_by_text = {
+        re.sub(r"\s+", "", field.get("raw_value", "")): field
+        for field in fields
+        if field.get("field_path", "").startswith(f"detail_images.{kind}_")
+    }
+    all_refs: list[str] = []
+    for line, refs in readings:
+        key = re.sub(r"\s+", "", line)
+        if not key:
+            continue
+        all_refs.extend(refs)
+        existing = existing_by_text.get(key)
+        if existing is not None:
+            existing["evidence_ids"] = list(
+                dict.fromkeys([*existing.get("evidence_ids", []), *refs])
+            )[:20]
+            continue
+        if key not in unique:
+            unique[key] = (line, [])
+        attached = unique[key][1]
+        attached[:] = list(dict.fromkeys([*attached, *refs]))[:20]
+    evidence_ids = list(dict.fromkeys(all_refs))[:20]
+    existing_positions = [
+        int(match.group(1))
+        for field in fields
+        if field.get("field_path", "").startswith(f"detail_images.{kind}_")
+        and (match := re.search(r"_(\d+)$", field.get("field_path", "")))
+    ]
+    start = max(existing_positions, default=0) + 1
+    remaining = max(0, 200 - len(fields))
+    for position, (line, refs) in enumerate(list(unique.values())[:remaining], start=start):
         snapshot.setdefault("fields", []).append(
             {
                 "observation_id": f"detail-{kind}-{position:02d}",
@@ -66,10 +96,14 @@ def _add_items(snapshot: dict, kind: str, lines: list[str]) -> None:
                 "label": LABELS.get(kind, "详情图"),
                 "raw_value": line[:2048],
                 "status": "ambiguous",
-                "evidence_ids": evidence_ids,
+                "evidence_ids": refs,
             }
         )
-    snapshot.setdefault("coverage", []).append(
+    coverage = snapshot.setdefault("coverage", [])
+    coverage[:] = [
+        entry for entry in coverage if entry.get("field_path") != f"detail_images.{kind}"
+    ]
+    coverage.append(
         {
             "field_path": f"detail_images.{kind}",
             "status": "ambiguous",
@@ -77,6 +111,126 @@ def _add_items(snapshot: dict, kind: str, lines: list[str]) -> None:
             "evidence_ids": evidence_ids,
         }
     )
+
+
+def enrich_detail_screenshots(
+    snapshot: dict,
+    screenshots: list[dict],
+    settings,
+    page_url: str,
+    batch_signature: str,
+    *,
+    check_cancel=lambda: None,
+) -> dict:
+    """Read temporary extension screenshots without downloading or storing image bytes."""
+    ordered = sorted(screenshots, key=lambda entry: entry["position"])
+    evidence_by_position: dict[int, dict] = {}
+    for entry in ordered:
+        position = entry["position"]
+        evidence_id = f"detail-shot-{batch_signature[:24]}-{position:02d}"
+        evidence = {
+            "evidence_id": evidence_id,
+            "field_path": f"detail_screenshots[{position:02d}]",
+            "source": "extension_screenshot",
+            "excerpt": f"详情图可见区域截图，页面滚动位置 {entry['scroll_y']}px。",
+            "locator": (
+                f"{page_url[:180]} · 扩展截图第 {position} 段 · scrollY={entry['scroll_y']}"
+            )[:256],
+        }
+        snapshot.setdefault("evidence", []).append(evidence)
+        evidence_by_position[position] = evidence
+
+    all_screenshot_refs = [
+        entry["evidence_id"]
+        for entry in snapshot.get("evidence", [])
+        if entry.get("source") == "extension_screenshot"
+    ]
+    coverage = snapshot.setdefault("coverage", [])
+    coverage[:] = [
+        entry for entry in coverage if entry.get("field_path") != "detail_images.browser_screenshot"
+    ]
+    coverage.append(
+        {
+            "field_path": "detail_images.browser_screenshot",
+            "status": "ambiguous",
+            "note": (
+                f"浏览器扩展截取 {len(all_screenshot_refs)} 个详情图可见区域；"
+                "截图原图只用于识别，不落盘。"
+            ),
+            "evidence_ids": all_screenshot_refs,
+        }
+    )
+
+    grouped_results: list[tuple[tuple[int, ...], tuple[list[str], list[str], list[str]]]] = []
+    batches = chunked(ordered, BATCH_SIZE)
+    with ThreadPoolExecutor(max_workers=min(DETAIL_VISION_WORKERS, max(1, len(batches)))) as pool:
+        futures = {
+            pool.submit(read_detail_batch, [entry["content"] for entry in group], settings): group
+            for group in batches
+        }
+        for future in as_completed(futures):
+            check_cancel()
+            group = futures[future]
+            try:
+                readings, _note = future.result()
+            except Exception:
+                continue
+            for offset, buckets in readings.items():
+                if 0 <= offset < len(group):
+                    grouped_results.append(((group[offset]["position"],), buckets))
+                elif offset == -1:
+                    grouped_results.append(
+                        (
+                            tuple(entry["position"] for entry in group),
+                            ([], [line for bucket in buckets for line in bucket], []),
+                        )
+                    )
+
+    parameter_lines: list[tuple[str, list[str]]] = []
+    claim_lines: list[tuple[str, list[str]]] = []
+    policy_lines: list[tuple[str, list[str]]] = []
+    for positions, buckets in sorted(grouped_results, key=lambda result: result[0]):
+        parameters, claims, policies = buckets
+        if not parameters and not claims and not policies:
+            continue
+        refs = [evidence_by_position[position]["evidence_id"] for position in positions]
+        excerpt = " / ".join(parameters + claims + policies)
+        if len(positions) > 1:
+            excerpt = "批次文案，未定位到单个截图片段：" + excerpt
+        for position in positions:
+            evidence = evidence_by_position[position]
+            evidence["excerpt"] = excerpt[:2048]
+        parameter_lines.extend((line, refs) for line in parameters)
+        claim_lines.extend((line, refs) for line in claims)
+        policy_lines.extend((line, refs) for line in policies)
+
+    if parameter_lines:
+        _add_items(snapshot, "parameter", parameter_lines)
+    if claim_lines:
+        _add_items(snapshot, "claim", claim_lines)
+    if policy_lines:
+        _add_items(snapshot, "policy", policy_lines)
+    if not parameter_lines and not claim_lines and not policy_lines:
+        coverage[:] = [
+            entry for entry in coverage if entry.get("field_path") != "detail_images.text"
+        ]
+        coverage.append(
+            {
+                "field_path": "detail_images.text",
+                "status": "missing",
+                "note": "已处理扩展截图片段，但没有识别到可引用的详情图文字。",
+                "evidence_ids": all_screenshot_refs,
+            }
+        )
+    else:
+        coverage[:] = [
+            entry for entry in coverage
+            if not (
+                entry.get("field_path") == "detail_images.text"
+                and entry.get("status") == "missing"
+            )
+        ]
+    return snapshot
 
 
 def enrich_detail_images(
@@ -126,7 +280,7 @@ def enrich_detail_images(
             else:
                 downloaded[position] = content
 
-    results: dict[int, tuple[list[str], list[str], list[str]]] = {}
+    results: list[tuple[tuple[int, ...], tuple[list[str], list[str], list[str]]]] = []
     batches = chunked(sorted(downloaded.items()), BATCH_SIZE)
     with ThreadPoolExecutor(max_workers=min(DETAIL_VISION_WORKERS, max(1, len(batches)))) as pool:
         futures = {
@@ -146,55 +300,65 @@ def enrich_detail_images(
                 continue
             for offset, buckets in grouped.items():
                 if 0 <= offset < len(group):
-                    results[group[offset][0]] = buckets
+                    results.append(((group[offset][0],), buckets))
+                elif offset == -1:
+                    # Unattributed text is a batch-level merchant claim. Keep all possible
+                    # source panels rather than fabricating a precise first-image citation.
+                    results.append(
+                        (
+                            tuple(position for position, _ in group),
+                            ([], [line for bucket in buckets for line in bucket], []),
+                        )
+                    )
 
-    parameter_lines: list[str] = []
-    claim_lines: list[str] = []
-    policy_lines: list[str] = []
-    read_images = 0
-    for position, image in enumerate(chosen):
-        buckets = results.get(position)
-        if not buckets:
-            continue
+    parameter_lines: list[tuple[str, list[str]]] = []
+    claim_lines: list[tuple[str, list[str]]] = []
+    policy_lines: list[tuple[str, list[str]]] = []
+    image_evidence: dict[int, dict] = {}
+    for positions, buckets in sorted(results, key=lambda entry: entry[0]):
         parameters, claims, policies = buckets
         if not parameters and not claims and not policies:
             continue
-        read_images += 1
-        index = image.get("index", 0)
-        evidence_id = f"detail-text-{index}"
-        snapshot.setdefault("evidence", []).append(
-            {
-                "evidence_id": evidence_id,
-                "field_path": f"detail_images[{index}].text",
-                "source": "detail_image_vision",
-                "excerpt": " / ".join(parameters + claims + policies)[:2048],
-                "locator": image["source_url"][:256],
-            }
-        )
+        refs = [f"detail-text-{chosen[position].get('index', 0)}" for position in positions]
+        text = " / ".join(parameters + claims + policies)
+        if len(positions) > 1:
+            text = "批次文案，未定位到单张图片：" + text
+        for position in positions:
+            image = chosen[position]
+            index = image.get("index", 0)
+            entry = image_evidence.setdefault(
+                position,
+                {
+                    "evidence_id": f"detail-text-{index}",
+                    "field_path": f"detail_images[{index}].text",
+                    "source": "detail_image_vision",
+                    "excerpt": "",
+                    "locator": image["source_url"][:256],
+                },
+            )
+            entry["excerpt"] = " / ".join(filter(None, [entry["excerpt"], text]))[:2048]
+        parameter_lines.extend((line, refs) for line in parameters)
+        claim_lines.extend((line, refs) for line in claims)
+        policy_lines.extend((line, refs) for line in policies)
+
+    for _position, entry in sorted(image_evidence.items()):
+        snapshot.setdefault("evidence", []).append(entry)
         coverage.append(
             {
-                "field_path": f"detail_images[{index}].text",
+                "field_path": entry["field_path"],
                 # Not "observed": the wording is the seller's own description.
                 "status": "ambiguous",
                 "note": "详情图文字由视觉模型读取，属商家标注。",
-                "evidence_ids": [evidence_id],
+                "evidence_ids": [entry["evidence_id"]],
             }
         )
-        parameter_lines.extend(parameters)
-        claim_lines.extend(claims)
-        policy_lines.extend(policies)
-
-    # The same line often appears on several panels; keep one copy of each.
-    parameter_lines = dedupe_texts(parameter_lines)
-    claim_lines = dedupe_texts(claim_lines)
-    policy_lines = dedupe_texts(policy_lines)
     if parameter_lines:
         _add_items(snapshot, "parameter", parameter_lines)
     if claim_lines:
         _add_items(snapshot, "claim", claim_lines)
     if policy_lines:
         _add_items(snapshot, "policy", policy_lines)
-    if not read_images:
+    if not image_evidence:
         coverage.append(
             {
                 "field_path": "detail_images.text",

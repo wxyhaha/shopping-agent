@@ -73,6 +73,22 @@ def test_headless_opens_dynamic_page_and_extracts_shared_evidence(tmp_path):
     assert "tracking" not in snapshot.page_url
 
 
+def test_current_jd_title_is_product_evidence_instead_of_an_extension_heading(tmp_path):
+    html = """<html><head><title>合成京东商品</title></head><body>
+    <h1 class="calculator-title">最小单价计算器</h1>
+    <div class="sku-title"><span class="sku-title-text">合成不锈钢保温杯500ml</span></div>
+    <div id="spec-n1">
+      <img src="https://img10.360buyimg.com/jfs/cup.jpg" width="800" height="800"></div>
+    <div id="summary-price">￥79.00</div></body></html>"""
+    result = collector(tmp_path, html).collect("https://item.jd.com/100001.html")
+    assert result.error_code is None
+    assert result.snapshot.status in {"partial", "complete"}
+    title = next(f for f in result.snapshot.fields if f.field_path == "product.title")
+    assert title.raw_value == "合成不锈钢保温杯500ml"
+    assert all("计算器" not in f.raw_value for f in result.snapshot.fields if f.raw_value)
+    assert any(e.field_path.startswith("images.gallery[") for e in result.snapshot.evidence)
+
+
 def test_login_is_saved_as_access_evidence_not_product_data(tmp_path):
     result = collector(tmp_path, "<title>登录</title><body>请先登录 扫码登录</body>").collect(
         "https://detail.tmall.com/item.htm?id=100001"

@@ -100,6 +100,8 @@ class BrowserLoginManager:
         identity = product_url_identity(url)
         if not identity:
             raise BrowserLoginError("此链接不是支持的商品详情页。")
+        if identity.platform == "jd" and not self.settings.jd_background_enabled:
+            raise BrowserLoginError("京东自动访问和独立登录已暂停，请勿继续尝试登录。")
         with self.lock:
             if self.closing:
                 raise BrowserLoginError("服务正在关闭，请稍后重试。")

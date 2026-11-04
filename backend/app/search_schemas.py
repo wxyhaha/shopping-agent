@@ -39,6 +39,8 @@ class SearchCandidate(SearchModel):
     platform: Literal["taobao", "tmall", "jd"]
     url: str = Field(max_length=2048)
     title: str = Field(min_length=1, max_length=512)
+    identity_source: Literal["direct_link", "sku_card"] = "direct_link"
+    locator: str = Field(default="a[href]", max_length=256)
 
 
 class SearchResult(SearchModel):

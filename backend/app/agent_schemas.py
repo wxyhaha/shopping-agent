@@ -48,6 +48,7 @@ class CollectionAvailability(BaseModel):
     parser_built: bool
     mode: Literal["headless"] = "headless"
     requires_open_product_page: Literal[False] = False
+    jd_background_enabled: bool = False
 
 
 class AskUserArgs(StrictModel):

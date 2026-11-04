@@ -63,14 +63,15 @@ def test_items_are_attributed_to_their_image(monkeypatch):
     assert "分批" in note
 
 
-def test_out_of_range_image_number_falls_back_to_first(monkeypatch):
+def test_out_of_range_image_number_is_not_attributed_to_first(monkeypatch):
     """An unusable image number must not invent an attribution to a missing panel."""
     payload = _reply([{"image": 99, "type": "parameter", "text": "长度15m"}])
     monkeypatch.setattr(
         "app.detail_vision.httpx.Client", lambda **_: _Client(_Response(200, payload))
     )
     grouped, _ = read_detail_batch([b"a", b"b"], _settings())
-    assert grouped[0][0] == ["长度15m"]
+    assert grouped[-1] == ([], ["长度15m"], [])
+    assert 0 not in grouped
 
 
 def test_unstructured_reply_degrades_to_one_bucket(monkeypatch):
@@ -79,8 +80,8 @@ def test_unstructured_reply_degrades_to_one_bucket(monkeypatch):
         "app.detail_vision.httpx.Client", lambda **_: _Client(_Response(200, payload))
     )
     grouped, note = read_detail_batch([b"a"], _settings())
-    assert grouped[0][1] == ["品质之选", "更快"]
-    assert "归入首张" in note
+    assert grouped[-1][1] == ["品质之选", "更快"]
+    assert "批次文案" in note
 
 
 def test_failed_request_returns_nothing(monkeypatch):

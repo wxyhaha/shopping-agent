@@ -76,6 +76,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasks/{task_id}/items/{item_id}/captures/{snapshot_id}/detail-screenshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload Detail Screenshots */
+        post: operations["upload_detail_screenshots_api_v1_tasks__task_id__items__item_id__captures__snapshot_id__detail_screenshots_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{task_id}/items/{item_id}": {
         parameters: {
             query?: never;
@@ -345,6 +362,8 @@ export interface components {
              * @enum {string}
              */
             error_code: "page_changed" | "capture_failed";
+            /** Detail */
+            detail?: string | null;
         };
         /** BrowserCaptureLease */
         BrowserCaptureLease: {
@@ -413,6 +432,8 @@ export interface components {
             status: "opening" | "awaiting_user" | "saving" | "saved" | "failed" | "cancelled" | "expired";
             /** Error */
             error: string | null;
+            /** Entry Note */
+            entry_note?: string | null;
         };
         /** BrowserPageConnection */
         BrowserPageConnection: {
@@ -482,7 +503,7 @@ export interface components {
              * Source
              * @enum {string}
              */
-            source: "visible_dom" | "json_ld" | "user_confirmed" | "image_metadata" | "navigation";
+            source: "visible_dom" | "json_ld" | "user_confirmed" | "image_metadata" | "detail_image_vision" | "extension_screenshot" | "navigation";
             /** Excerpt */
             excerpt?: string | null;
             /** Locator */
@@ -557,6 +578,11 @@ export interface components {
             platform: "taobao" | "tmall" | "jd";
             /** Received At */
             received_at: string;
+            /**
+             * Detail Enrichment
+             * @enum {string}
+             */
+            detail_enrichment: "done" | "pending";
         };
         /** CaptureSnapshotSubmit */
         CaptureSnapshotSubmit: {
@@ -618,6 +644,11 @@ export interface components {
              * @constant
              */
             requires_open_product_page: false;
+            /**
+             * Jd Background Enabled
+             * @default false
+             */
+            jd_background_enabled: boolean;
         };
         /** ConditionCheck */
         ConditionCheck: {
@@ -639,6 +670,21 @@ export interface components {
             title?: string | null;
             /** Items */
             items: components["schemas"]["ItemInput"][];
+        };
+        /** DetailScreenshotUploadResponse */
+        DetailScreenshotUploadResponse: {
+            /** Snapshot Id */
+            snapshot_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "already_processed";
+            /**
+             * Screenshot Count
+             * @description 当前请求批次接收的截图段数。
+             */
+            screenshot_count: number;
         };
         /** Finding */
         Finding: {
@@ -1331,6 +1377,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CaptureSnapshotRead"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_detail_screenshots_api_v1_tasks__task_id__items__item_id__captures__snapshot_id__detail_screenshots_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+                item_id: string;
+                snapshot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    page_url: string;
+                    /** @description 单次请求最多 16 段；同一快照可在前一批识别完成后继续上传。 */
+                    screenshots: {
+                        position: number;
+                        scroll_y: number;
+                        image_base64: string;
+                    }[];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DetailScreenshotUploadResponse"];
                 };
             };
             /** @description Validation Error */

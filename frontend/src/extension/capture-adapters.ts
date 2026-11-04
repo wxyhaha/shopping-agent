@@ -25,6 +25,7 @@ interface KeyValuePair {
   label: string;
   value: string;
   locator: string;
+  ambiguous?: boolean;
 }
 
 const SELECTORS: Record<Platform, AdapterSelectors> = {
@@ -44,7 +45,7 @@ const SELECTORS: Record<Platform, AdapterSelectors> = {
     seller: [".slogo-shopname", "[class*='shopName']", "[class*='shop-info']"],
     price: ["[class*='SkuPanel'] [class*='price']", "#J_PromoPrice", ".tm-price", "[itemprop='price']", "[class*='price']"],
     sku: [".skuOptionsArea", "[class*='skuOptionsArea']", "#J_isku", ".tb-sku"],
-    specifications: ["#J_AttrUL", "#attributes", ".J_AttrList", "[class*='attr-list']", "[class*='attributes']", ".page-content-area"],
+    specifications: [".paramsInfoArea", "[class*='paramsWrap--']", "#J_AttrUL", "#attributes", ".J_AttrList", "[class*='attr-list']", "[class*='attributes']", ".page-content-area"],
     gallery: [".picGalleryEle", "#J_ImgBooth", "#spec-list", "[class*='picGallery']"],
     // Tmall's current detail section uses the `descV8-` prefix; the older #J_DivItemDesc
     // ids no longer exist on the redesigned item page.
@@ -54,7 +55,7 @@ const SELECTORS: Record<Platform, AdapterSelectors> = {
     // JD's PC item host answers with a risk-control page, so collection uses the mobile
     // host (item.m.jd.com). Both layouts are listed: the mobile DOM uses different
     // container names and its price element is a bare ".price".
-    title: ["#name h1", ".sku-name", "[class*='skuName']", "h1"],
+    title: [".sku-title-text", ".sku-title-name", "#name h1", ".sku-name", "[class*='skuName']", "h1"],
     brand: ["#parameter", ".p-parameter", "[class*='parameter']", "[class*='brand']"],
     seller: ["#sellerName", ".shop-name", "[class*='seller']", "[class*='shopName']"],
     price: [
@@ -69,7 +70,7 @@ const SELECTORS: Record<Platform, AdapterSelectors> = {
       "#parameter", ".p-parameter", "[class*='parameter']",
       "[class*='attributes']", "[class*='spec']", "[class*='param']",
     ],
-    gallery: ["#spec-list", "#preview", "[class*='gallery']", "[class*='banner']"],
+    gallery: ["#spec-n1", "#spec-list", "#preview", "[class*='gallery']", "[class*='banner']"],
     details: [
       "#detail", "#detailContent", "[class*='detail-content']",
       "[class*='description']", "[class*='detail']",
@@ -262,6 +263,20 @@ function findSpecificationPairs(document: Document, selectors: string[]): KeyVal
     for (const container of document.querySelectorAll(selector)) {
       if (!isVisible(container)) continue;
       const local: KeyValuePair[] = [];
+      // Current Tmall has two card layouts with opposite label/value order.
+      for (const [rowSelector, labelSelector, valueSelector] of [
+        ["[class*='emphasisParamsInfoItem--']", "[class*='emphasisParamsInfoItemSubTitle--']", "[class*='emphasisParamsInfoItemTitle--']"],
+        ["[class*='generalParamsInfoItem--']", "[class*='generalParamsInfoItemTitle--']", "[class*='generalParamsInfoItemSubTitle--']"],
+      ]) {
+        for (const row of container.querySelectorAll(rowSelector)) {
+          const label = row.querySelector(labelSelector);
+          const value = row.querySelector(valueSelector);
+          if (!label || !value || !isVisible(label) || !isVisible(value)) continue;
+          local.push({ label: cleanText(label.textContent, 80), value: cleanText(value.textContent),
+            locator: `${selector} ${rowSelector}`,
+            ambiguous: Boolean(row.querySelector("[class*='aiAnnotatedText--']")) });
+        }
+      }
       for (const label of container.querySelectorAll("dt")) {
         const value = label.nextElementSibling;
         if (value?.tagName.toLowerCase() !== "dd") continue;
@@ -353,13 +368,14 @@ export function collectCurrentProductSnapshot(
     value: string | null,
     source: CaptureEvidenceInput["source"] = "visible_dom",
     locator = "",
+    status: CaptureObservationInput["status"] = "observed",
   ): string[] {
     if (!value) {
       fields.push({ observation_id: `o${String(fields.length + 1).padStart(3, "0")}`, field_path: fieldPath, label, status: "missing", evidence_ids: [] });
       return [];
     }
     const evidenceId = addEvidence(fieldPath, source, value, locator || source);
-    fields.push({ observation_id: `o${String(fields.length + 1).padStart(3, "0")}`, field_path: fieldPath, label, raw_value: value, normalized_value: value, status: "observed", evidence_ids: [evidenceId] });
+    fields.push({ observation_id: `o${String(fields.length + 1).padStart(3, "0")}`, field_path: fieldPath, label, raw_value: value, normalized_value: value, status, evidence_ids: [evidenceId] });
     return [evidenceId];
   }
 
@@ -372,8 +388,8 @@ export function collectCurrentProductSnapshot(
   const brandPair = pairs.find((pair) => /^(品牌|brand)$/i.test(pair.label));
   const jsonLdBrand = jsonLdString(product, "brand");
   const brandValue = brandPair?.value || jsonLdBrand;
-  const brandEvidence = addField("product.brand", "品牌", brandValue, brandPair ? "visible_dom" : jsonLdBrand ? "json_ld" : "visible_dom", brandPair?.locator || "JSON-LD Product.brand");
-  coverage.push({ field_path: "product.brand", status: brandValue ? "observed" : "missing", note: brandValue ? undefined : "页面未提供可核对的品牌字段。", evidence_ids: brandEvidence });
+  const brandEvidence = addField("product.brand", "品牌", brandValue, brandPair ? "visible_dom" : jsonLdBrand ? "json_ld" : "visible_dom", brandPair?.locator || "JSON-LD Product.brand", brandPair?.ambiguous ? "ambiguous" : "observed");
+  coverage.push({ field_path: "product.brand", status: brandValue ? brandPair?.ambiguous ? "ambiguous" : "observed" : "missing", note: brandPair?.ambiguous ? "页面将该项标注为平台 AI 提取，待核对。" : brandValue ? undefined : "页面未提供可核对的品牌字段。", evidence_ids: brandEvidence });
 
   const seller = firstVisibleText(document, selectors.seller, 512);
   const sellerName = seller ? normalizeSellerName(seller.value) : "";
@@ -390,12 +406,14 @@ export function collectCurrentProductSnapshot(
       label: pair.label,
       raw_value: `${pair.label}：${pair.value}`,
       normalized_value: pair.value,
-      status: "observed",
+      status: pair.ambiguous ? "ambiguous" : "observed",
       evidence_ids: [evidenceId],
     });
+    if (pair.ambiguous) coverage.push({ field_path: fieldPath, status: "ambiguous",
+      note: "页面将该参数标注为平台 AI 提取，待核对。", evidence_ids: [evidenceId] });
   }
-  const specsEvidence = specPairs.map((_, index) => evidence.find((entry) => entry.field_path === fieldPathForSpec(index))?.evidence_id).filter((value): value is string => Boolean(value));
-  coverage.push({ field_path: "specifications", status: specPairs.length ? "observed" : "missing", note: specPairs.length ? undefined : "页面规格区尚未识别；不会把详情宣传文案当作参数。", evidence_ids: specsEvidence });
+  const specsEvidence = specPairs.map((_, index) => evidence.find((entry) => entry.field_path === fieldPathForSpec(index))?.evidence_id).filter((value): value is string => Boolean(value)).slice(0, 20);
+  coverage.push({ field_path: "specifications", status: specPairs.some(pair => pair.ambiguous) ? "ambiguous" : specPairs.length ? "observed" : "missing", note: specPairs.some(pair => pair.ambiguous) ? "部分参数被页面标注为平台 AI 提取，待核对。" : specPairs.length ? undefined : "页面规格区尚未识别；不会把详情宣传文案当作参数。", evidence_ids: specsEvidence });
 
   const catalog = inspectVariants();
   for (const group of catalog.groups) {
@@ -520,7 +538,9 @@ export function collectCurrentProductSnapshot(
       return;
     }
     const imageEvidence: string[] = [];
-    const imageCandidates = Array.from(container.querySelectorAll("img")).slice(0, Math.max(0, 40 - images.length));
+    const imageCandidates = Array.from(container.querySelectorAll("img"));
+    const limit = Math.max(0, 40 - images.length);
+    let eligible = 0;
     for (const image of imageCandidates) {
       if (!isVisible(image)) continue;
       if (kind === "detail") {
@@ -529,6 +549,8 @@ export function collectCurrentProductSnapshot(
       }
       const sourceUrl = imageUrlWithoutQuery(image.currentSrc || image.src, pageUrl);
       if (!sourceUrl) continue;
+      eligible += 1;
+      if (imageEvidence.length >= limit) continue;
       const loaded = image.complete && image.naturalWidth > 0;
       const index = images.length;
       const fieldPath = `images.${kind}[${index}]`;
@@ -549,10 +571,11 @@ export function collectCurrentProductSnapshot(
     const loadedCount = images.filter(
       (image) => image.status === "observed" && (image.evidence_ids ?? []).some((id) => imageEvidence.includes(id)),
     ).length;
+    const truncated = eligible > imageEvidence.length;
     coverage.push({
       field_path: `images.${kind}`,
-      status: loadedCount ? "observed" : "missing",
-      note: loadedCount ? `发现 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无可用的已加载图片。",
+      status: truncated ? "ambiguous" : loadedCount ? "observed" : "missing",
+      note: `${loadedCount ? `记录 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无已记录的可用图片。"}${truncated ? `发现 ${eligible} 张符合规则的图片，受本次总量上限限制，仅记录 ${imageEvidence.length} 张；不代表完整读取。` : ""}`,
       // A gallery or detail section can hold far more images than the contract's evidence
       // cap; the count above still reports the true total.
       evidence_ids: imageEvidence.slice(0, 20),
@@ -581,7 +604,7 @@ export function collectCurrentProductSnapshot(
     adapter_id: `${platform}-dom`,
     // Bumped whenever the parsing rules change, so a stored snapshot shows which rules
     // produced it. A masked price read as a number can only be traced this way.
-    adapter_version: "0.3.0",
+    adapter_version: "0.3.3",
     page_url: pageUrl,
     canonical_url: canonicalUrl,
     captured_at: new Date().toISOString(),

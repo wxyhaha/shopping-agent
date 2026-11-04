@@ -13,8 +13,9 @@ const SPEC_TAB_LABELS = ["规格参数", "商品参数", "产品参数", "参数
 const DEFAULT_WAIT_MS = 1200;
 
 function isTabLike(element: Element): boolean {
-  if (element.tagName === "A") return false;
-  if (element.hasAttribute("href")) return false;
+  if (!["BUTTON", "DIV", "SPAN", "LI"].includes(element.tagName)) return false;
+  if (element.closest("a, [href], form")) return false;
+  if (element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") return false;
   const style = getComputedStyle(element);
   if (style.display === "none" || style.visibility === "hidden") return false;
   return element.getBoundingClientRect().width > 0;
@@ -30,13 +31,7 @@ function findSpecTab(document: Document): HTMLElement | null {
     }
     node = walker.nextNode();
   }
-  // Prefer a node whose own text is the label but that is not a bare heading: a tab is
-  // usually a clickable container, while an H3 with the same text is only a heading.
-  return (
-    candidates.find((element) => !["H1", "H2", "H3", "H4", "H5", "H6"].includes(element.tagName)) ??
-    candidates[0] ??
-    null
-  );
+  return candidates[0] ?? null;
 }
 
 /** Click the specification tab when present; return its label, or null when none applies. */

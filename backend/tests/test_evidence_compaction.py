@@ -64,6 +64,7 @@ def test_differing_references_are_not_collapsed():
     summary = detail_research_summary(fields, ref_prefix="snap-1:")
     assert "detail_refs" not in summary
     assert "详见 evidence" in summary["detail_refs_note"]
+    assert summary["detail_parameter_refs"] == [["snap-1:detail-text-1"], ["snap-1:detail-text-2"]]
 
 
 def test_ordinary_fields_are_preserved_verbatim():

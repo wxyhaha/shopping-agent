@@ -13,6 +13,12 @@ from app.config import Settings
 from tests.test_research_agent import application, seed
 
 
+@pytest.fixture(autouse=True)
+def opt_in_for_login_lifecycle_checks(monkeypatch):
+    # These existing lifecycle tests exercise the explicitly enabled, controlled login path.
+    monkeypatch.setenv("SHOPPING_AGENT_JD_BACKGROUND_ENABLED", "true")
+
+
 class Page:
     def goto(self, url, **kwargs):
         self.url = url

@@ -1,7 +1,7 @@
 {
   "name": "shopping-agent-frontend",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.7",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -11,7 +11,8 @@
     "build:web": "vite build",
     "build:collector": "node scripts/build-collector.mjs",
     "build:chrome": "wxt build --browser chrome",
-    "build:edge": "wxt build --browser edge"
+    "build:edge": "wxt build --browser edge",
+    "test:extension": "node --experimental-strip-types --test tests/capture-bridge.test.mjs tests/capture-preparation.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.105.0",

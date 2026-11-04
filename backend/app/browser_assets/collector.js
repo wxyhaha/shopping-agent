@@ -165,6 +165,8 @@ var ShoppingAgentCollector = (function(exports) {
 				".tb-sku"
 			],
 			specifications: [
+				".paramsInfoArea",
+				"[class*='paramsWrap--']",
 				"#J_AttrUL",
 				"#attributes",
 				".J_AttrList",
@@ -190,6 +192,8 @@ var ShoppingAgentCollector = (function(exports) {
 		},
 		jd: {
 			title: [
+				".sku-title-text",
+				".sku-title-name",
 				"#name h1",
 				".sku-name",
 				"[class*='skuName']",
@@ -233,6 +237,7 @@ var ShoppingAgentCollector = (function(exports) {
 				"[class*='param']"
 			],
 			gallery: [
+				"#spec-n1",
 				"#spec-list",
 				"#preview",
 				"[class*='gallery']",
@@ -442,6 +447,25 @@ var ShoppingAgentCollector = (function(exports) {
 		for (const selector of selectors) for (const container of document.querySelectorAll(selector)) {
 			if (!isVisible(container)) continue;
 			const local = [];
+			for (const [rowSelector, labelSelector, valueSelector] of [[
+				"[class*='emphasisParamsInfoItem--']",
+				"[class*='emphasisParamsInfoItemSubTitle--']",
+				"[class*='emphasisParamsInfoItemTitle--']"
+			], [
+				"[class*='generalParamsInfoItem--']",
+				"[class*='generalParamsInfoItemTitle--']",
+				"[class*='generalParamsInfoItemSubTitle--']"
+			]]) for (const row of container.querySelectorAll(rowSelector)) {
+				const label = row.querySelector(labelSelector);
+				const value = row.querySelector(valueSelector);
+				if (!label || !value || !isVisible(label) || !isVisible(value)) continue;
+				local.push({
+					label: cleanText(label.textContent, 80),
+					value: cleanText(value.textContent),
+					locator: `${selector} ${rowSelector}`,
+					ambiguous: Boolean(row.querySelector("[class*='aiAnnotatedText--']"))
+				});
+			}
 			for (const label of container.querySelectorAll("dt")) {
 				const value = label.nextElementSibling;
 				if (value?.tagName.toLowerCase() !== "dd") continue;
@@ -541,7 +565,7 @@ var ShoppingAgentCollector = (function(exports) {
 			});
 			return evidenceId;
 		}
-		function addField(fieldPath, label, value, source = "visible_dom", locator = "") {
+		function addField(fieldPath, label, value, source = "visible_dom", locator = "", status = "observed") {
 			if (!value) {
 				fields.push({
 					observation_id: `o${String(fields.length + 1).padStart(3, "0")}`,
@@ -559,7 +583,7 @@ var ShoppingAgentCollector = (function(exports) {
 				label,
 				raw_value: value,
 				normalized_value: value,
-				status: "observed",
+				status,
 				evidence_ids: [evidenceId]
 			});
 			return [evidenceId];
@@ -577,11 +601,11 @@ var ShoppingAgentCollector = (function(exports) {
 		const brandPair = pairs.find((pair) => /^(品牌|brand)$/i.test(pair.label));
 		const jsonLdBrand = jsonLdString(product, "brand");
 		const brandValue = brandPair?.value || jsonLdBrand;
-		const brandEvidence = addField("product.brand", "品牌", brandValue, brandPair ? "visible_dom" : jsonLdBrand ? "json_ld" : "visible_dom", brandPair?.locator || "JSON-LD Product.brand");
+		const brandEvidence = addField("product.brand", "品牌", brandValue, brandPair ? "visible_dom" : jsonLdBrand ? "json_ld" : "visible_dom", brandPair?.locator || "JSON-LD Product.brand", brandPair?.ambiguous ? "ambiguous" : "observed");
 		coverage.push({
 			field_path: "product.brand",
-			status: brandValue ? "observed" : "missing",
-			note: brandValue ? void 0 : "页面未提供可核对的品牌字段。",
+			status: brandValue ? brandPair?.ambiguous ? "ambiguous" : "observed" : "missing",
+			note: brandPair?.ambiguous ? "页面将该项标注为平台 AI 提取，待核对。" : brandValue ? void 0 : "页面未提供可核对的品牌字段。",
 			evidence_ids: brandEvidence
 		});
 		const seller = firstVisibleText(document, selectors.seller, 512);
@@ -603,15 +627,21 @@ var ShoppingAgentCollector = (function(exports) {
 				label: pair.label,
 				raw_value: `${pair.label}：${pair.value}`,
 				normalized_value: pair.value,
-				status: "observed",
+				status: pair.ambiguous ? "ambiguous" : "observed",
+				evidence_ids: [evidenceId]
+			});
+			if (pair.ambiguous) coverage.push({
+				field_path: fieldPath,
+				status: "ambiguous",
+				note: "页面将该参数标注为平台 AI 提取，待核对。",
 				evidence_ids: [evidenceId]
 			});
 		}
-		const specsEvidence = specPairs.map((_, index) => evidence.find((entry) => entry.field_path === fieldPathForSpec(index))?.evidence_id).filter((value) => Boolean(value));
+		const specsEvidence = specPairs.map((_, index) => evidence.find((entry) => entry.field_path === fieldPathForSpec(index))?.evidence_id).filter((value) => Boolean(value)).slice(0, 20);
 		coverage.push({
 			field_path: "specifications",
-			status: specPairs.length ? "observed" : "missing",
-			note: specPairs.length ? void 0 : "页面规格区尚未识别；不会把详情宣传文案当作参数。",
+			status: specPairs.some((pair) => pair.ambiguous) ? "ambiguous" : specPairs.length ? "observed" : "missing",
+			note: specPairs.some((pair) => pair.ambiguous) ? "部分参数被页面标注为平台 AI 提取，待核对。" : specPairs.length ? void 0 : "页面规格区尚未识别；不会把详情宣传文案当作参数。",
 			evidence_ids: specsEvidence
 		});
 		const catalog = inspectVariants();
@@ -742,7 +772,9 @@ var ShoppingAgentCollector = (function(exports) {
 				return;
 			}
 			const imageEvidence = [];
-			const imageCandidates = Array.from(container.querySelectorAll("img")).slice(0, Math.max(0, 40 - images.length));
+			const imageCandidates = Array.from(container.querySelectorAll("img"));
+			const limit = Math.max(0, 40 - images.length);
+			let eligible = 0;
 			for (const image of imageCandidates) {
 				if (!isVisible(image)) continue;
 				if (kind === "detail") {
@@ -751,6 +783,8 @@ var ShoppingAgentCollector = (function(exports) {
 				}
 				const sourceUrl = imageUrlWithoutQuery(image.currentSrc || image.src, pageUrl);
 				if (!sourceUrl) continue;
+				eligible += 1;
+				if (imageEvidence.length >= limit) continue;
 				const loaded = image.complete && image.naturalWidth > 0;
 				const index = images.length;
 				const evidenceId = addEvidence(`images.${kind}[${index}]`, "image_metadata", `${cleanText(image.alt, 512) || "无替代文本"} · ${loaded ? `${image.naturalWidth}×${image.naturalHeight}` : "尚未加载"}`, `${candidates.join(", ")} img`);
@@ -767,10 +801,11 @@ var ShoppingAgentCollector = (function(exports) {
 				});
 			}
 			const loadedCount = images.filter((image) => image.status === "observed" && (image.evidence_ids ?? []).some((id) => imageEvidence.includes(id))).length;
+			const truncated = eligible > imageEvidence.length;
 			coverage.push({
 				field_path: `images.${kind}`,
-				status: loadedCount ? "observed" : "missing",
-				note: loadedCount ? `发现 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无可用的已加载图片。",
+				status: truncated ? "ambiguous" : loadedCount ? "observed" : "missing",
+				note: `${loadedCount ? `记录 ${loadedCount} 张已加载图片；当前只保存来源 URL 和尺寸，不保存图片字节。` : "图片区域尚无已记录的可用图片。"}${truncated ? `发现 ${eligible} 张符合规则的图片，受本次总量上限限制，仅记录 ${imageEvidence.length} 张；不代表完整读取。` : ""}`,
 				evidence_ids: imageEvidence.slice(0, 20)
 			});
 		}
@@ -788,7 +823,7 @@ var ShoppingAgentCollector = (function(exports) {
 		return {
 			schema_version: 1,
 			adapter_id: `${platform}-dom`,
-			adapter_version: "0.3.0",
+			adapter_version: "0.3.3",
 			page_url: pageUrl,
 			canonical_url: canonicalUrl,
 			captured_at: (/* @__PURE__ */ new Date()).toISOString(),
@@ -802,10 +837,260 @@ var ShoppingAgentCollector = (function(exports) {
 			coverage
 		};
 	}
+	// src/extension/capture-preparation.ts
+	/** A bounded observation, never a promise that the whole product page was read. */
+	async function prepareDetails(host, options = { scroll: true }) {
+		const deadline = host.now() + Math.min(12e3, Math.max(0, options.budgetMs ?? 12e3));
+		const maxSteps = Math.min(24, Math.max(0, options.maxSteps ?? 24));
+		let steps = 0;
+		let previous = "";
+		let stableSince = host.now();
+		try {
+			host.check();
+			if (!options.scroll) return {
+				reason: "read_only",
+				steps,
+				detail: host.inspect()
+			};
+			while (true) {
+				host.check();
+				const detail = host.inspect();
+				if (detail.signature !== previous || !detail.atEnd || detail.pending > 0) {
+					previous = detail.signature;
+					stableSince = host.now();
+				}
+				if (detail.found && detail.atEnd && !detail.pending && host.now() - stableSince >= 1e3) return {
+					reason: "settled",
+					steps,
+					detail
+				};
+				if (host.now() >= deadline) return {
+					reason: "time_limit",
+					steps,
+					detail
+				};
+				host.status(`正在读取详情区：${detail.loaded} 张图片已加载，${detail.pending} 张待加载…`);
+				if (!detail.atEnd) {
+					if (steps >= maxSteps) return {
+						reason: "step_limit",
+						steps,
+						detail
+					};
+					host.advance();
+					steps += 1;
+				}
+				await host.wait(Math.min(300, deadline - host.now()));
+			}
+		} finally {
+			host.restore();
+		}
+	}
+	function addPreparationCoverage(snapshot, result) {
+		const { detail, reason, steps } = result;
+		const conclusion = reason === "settled" ? "已滚动到已识别详情区末端，已发现图片在短暂观察期内稳定；不保证页面完整。" : reason === "read_only" ? "本次仅读取当前已加载内容，没有滚动加载详情。" : reason === "step_limit" ? "已达到滚动次数上限，后续详情可能尚未加载。" : "已达到等待期限，后续详情可能尚未加载。";
+		snapshot.coverage = (snapshot.coverage ?? []).filter((entry) => entry.field_path !== "page.detail_preparation");
+		snapshot.coverage.push({
+			field_path: "page.detail_preparation",
+			status: "ambiguous",
+			evidence_ids: [],
+			note: `${conclusion} ${detail.found ? "已识别详情区域" : "未识别详情区域"}；滚动 ${steps} 次；发现 ${detail.loaded} 张已加载、${detail.pending} 张待加载图片。图片文字识别单独处理。`
+		});
+		if (snapshot.status === "complete") snapshot.status = "partial";
+		return snapshot;
+	}
+	// src/extension/spec-panel.ts
+	/** Reveal a collapsed parameter table before the page snapshot is taken.
+	*
+	* Marketplace item pages can keep the specification table behind a tab that only renders
+	* on click. Reading the DOM without that click records "specifications missing" even
+	* though the data is one interaction away, so the table is expanded first.
+	*
+	* Only tab-shaped elements are clicked. A control that navigates elsewhere is skipped,
+	* because the snapshot must keep describing the same product page.
+	*/
+	var SPEC_TAB_LABELS = [
+		"规格参数",
+		"商品参数",
+		"产品参数",
+		"参数规格",
+		"规格与包装"
+	];
+	var DEFAULT_WAIT_MS = 1200;
+	function isTabLike(element) {
+		if (![
+			"BUTTON",
+			"DIV",
+			"SPAN",
+			"LI"
+		].includes(element.tagName)) return false;
+		if (element.closest("a, [href], form")) return false;
+		if (element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") return false;
+		const style = getComputedStyle(element);
+		if (style.display === "none" || style.visibility === "hidden") return false;
+		return element.getBoundingClientRect().width > 0;
+	}
+	function findSpecTab(document) {
+		const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+		const candidates = [];
+		let node = walker.nextNode();
+		while (node) {
+			if (node instanceof HTMLElement && SPEC_TAB_LABELS.includes((node.textContent || "").trim())) {
+				if (isTabLike(node)) candidates.push(node);
+			}
+			node = walker.nextNode();
+		}
+		return candidates[0] ?? null;
+	}
+	/** Click the specification tab when present; return its label, or null when none applies. */
+	async function expandSpecPanel(document, waitMs = DEFAULT_WAIT_MS) {
+		const tab = findSpecTab(document);
+		if (!tab) return null;
+		const label = (tab.textContent || "").trim();
+		const before = document.body.innerText.length;
+		try {
+			tab.click();
+		} catch {
+			return null;
+		}
+		await new Promise((resolve) => setTimeout(resolve, waitMs));
+		return document.body.innerText.length > before ? label : null;
+	}
+	// src/extension/page-capture.ts
+	var DETAIL_SELECTORS = [
+		"#J_DivItemDesc",
+		"#description",
+		"#detailContent",
+		"[class*='descV8']",
+		"[class*='detail-content']",
+		"#detail"
+	];
+	/** Read a user-opened page; no marketplace fetches, navigation, or SKU changes. */
+	async function captureOpenedProduct(pageUrl, options) {
+		const view = document.defaultView;
+		const origin = {
+			x: view.scrollX,
+			y: view.scrollY
+		};
+		const status = options.status ?? (() => {});
+		const selection = () => JSON.stringify(inspectVariants().groups.map((group) => [group.label, group.options.filter((option) => option.selected).map((option) => option.label)]));
+		const initialSelection = selection();
+		let interrupted = false;
+		const interrupt = (event) => {
+			if (event.target instanceof Element && event.target.closest("shopping-agent-product-assistant")) return;
+			interrupted = true;
+		};
+		const interruptKey = (event) => {
+			if ([
+				"ArrowUp",
+				"ArrowDown",
+				"PageUp",
+				"PageDown",
+				"Home",
+				"End",
+				" "
+			].includes(event.key)) interrupt(event);
+		};
+		const check = () => {
+			if (options.signal?.aborted) throw new Error("采集已取消，未提交商品快照。");
+			if (location.href !== pageUrl) throw new Error("商品页已变化，本次快照未提交，请在当前商品页重试。");
+			if (interrupted) throw new Error("检测到页面操作，采集已停止，请选好规格后重新读取。");
+			if (options.scroll && document.visibilityState !== "visible") throw new Error("商品页已切到后台，采集已停止，请回到此页重新读取。");
+			if (selection() !== initialSelection) throw new Error("选中规格在采集期间发生变化，请等待价格更新后重新读取。");
+		};
+		const wait = async (ms) => {
+			const end = performance.now() + ms;
+			do {
+				check();
+				await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(0, end - performance.now()))));
+			} while (performance.now() < end);
+			check();
+		};
+		const container = () => DETAIL_SELECTORS.map((selector) => document.querySelector(selector)).find((node) => node && node.getClientRects().length && getComputedStyle(node).visibility !== "hidden");
+		const images = () => Array.from(container()?.querySelectorAll("img") ?? []);
+		const inspect = () => {
+			const root = container();
+			const candidates = images();
+			const loaded = candidates.filter((image) => image.complete && image.naturalWidth > 0).length;
+			const bottom = root ? root.getBoundingClientRect().bottom : document.documentElement.scrollHeight - view.scrollY;
+			return {
+				found: Boolean(root),
+				atEnd: bottom <= view.innerHeight + 8,
+				loaded,
+				pending: candidates.length - loaded,
+				signature: JSON.stringify([
+					Boolean(root),
+					Math.round(bottom + view.scrollY),
+					candidates.map((image) => [
+						image.currentSrc || image.src,
+						image.complete,
+						image.naturalWidth
+					])
+				])
+			};
+		};
+		const eventOptions = {
+			capture: true,
+			passive: true
+		};
+		if (options.scroll) {
+			view.addEventListener("wheel", interrupt, eventOptions);
+			view.addEventListener("touchstart", interrupt, eventOptions);
+			view.addEventListener("pointerdown", interrupt, eventOptions);
+			view.addEventListener("keydown", interruptKey, true);
+		}
+		try {
+			check();
+			status("正在展开规格参数…");
+			const expanded = options.scroll ? await expandSpecPanel(document) : null;
+			check();
+			status(expanded ? `已展开“${expanded}”，正在加载详情…` : "正在检查详情区…");
+			const preparation = await prepareDetails({
+				now: () => performance.now(),
+				check,
+				wait,
+				inspect,
+				status,
+				advance: () => view.scrollTo({
+					top: view.scrollY + Math.max(200, view.innerHeight * .75),
+					behavior: "instant"
+				}),
+				restore: () => {
+					if (options.scroll && !interrupted && location.href === pageUrl && document.visibilityState === "visible") view.scrollTo({
+						left: origin.x,
+						top: origin.y,
+						behavior: "instant"
+					});
+				}
+			}, options);
+			check();
+			status("正在核对选中规格和价格是否稳定…");
+			const first = collectCurrentProductSnapshot(document, pageUrl, document.title);
+			await wait(500);
+			const snapshot = collectCurrentProductSnapshot(document, pageUrl, document.title);
+			check();
+			const stamp = (value) => JSON.stringify([
+				value.selected_variant.status,
+				value.selected_variant.label,
+				value.prices?.map((price) => [
+					price.raw_text,
+					price.amount,
+					price.kind
+				])
+			]);
+			if (stamp(first) !== stamp(snapshot)) throw new Error("规格或价格仍在更新，本次快照未提交，请稍后重新读取。");
+			return addPreparationCoverage(snapshot, preparation);
+		} finally {
+			view.removeEventListener("wheel", interrupt, true);
+			view.removeEventListener("touchstart", interrupt, true);
+			view.removeEventListener("pointerdown", interrupt, true);
+			view.removeEventListener("keydown", interruptKey, true);
+		}
+	}
 	// src/extension/backend-collector.ts
 	function collect() {
 		return collectCurrentProductSnapshot(document, location.href, document.title);
 	}
+	exports.captureOpenedProduct = captureOpenedProduct;
 	exports.collect = collect;
 	exports.inspectVariants = inspectVariants;
 	exports.validateVariantTarget = validateVariantTarget;

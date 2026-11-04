@@ -584,6 +584,8 @@ function CaptureSnapshotDetails({ snapshot }: { snapshot: CaptureSnapshot }) {
   const coverage = snapshot.coverage ?? [];
   const evidence = snapshot.evidence ?? [];
   const loadedImages = images.filter((image) => image.status === "observed" && image.loaded).length;
+  const screenshotEvidenceCount = evidence.filter((entry) => entry.source === "extension_screenshot").length;
+  const imageVisionEvidenceCount = evidence.filter((entry) => entry.source === "detail_image_vision").length;
   const missingCoverage = coverage.filter((entry) => ["missing", "ambiguous", "blocked"].includes(entry.status));
   const platformLabel = snapshot.platform === "jd" ? "京东" : snapshot.platform === "tmall" ? "天猫" : "淘宝";
   const captureStatus = snapshot.status === "complete" ? "采集完整" : snapshot.status === "blocked" ? "页面受阻" : snapshot.status === "failed" ? "采集失败" : "部分采集";
@@ -654,8 +656,14 @@ function CaptureSnapshotDetails({ snapshot }: { snapshot: CaptureSnapshot }) {
             </li>
           ))}
         </ul>
-        {images.length > 0 && <p>图片内容尚未下载或送入模型；当前记录 {images.length} 条来源引用。</p>}
-        <p>字段证据来自页面 DOM、页面 JSON-LD 或图片元数据；商家展示信息仍需人工核对。</p>
+        {screenshotEvidenceCount > 0
+          ? <p>浏览器截图识别来源 {screenshotEvidenceCount} 段；截图原图未保存。商品图片另记录 {images.length} 条来源引用。</p>
+          : imageVisionEvidenceCount > 0
+            ? <p>视觉模型读取了 {imageVisionEvidenceCount} 条详情图来源；图片原图未保存在快照中。</p>
+            : images.length > 0
+              ? <p>尚无详情图文字识别记录；当前仅保留 {images.length} 条商品图片来源引用。</p>
+              : null}
+        <p>证据来自页面 DOM、JSON-LD、图片元数据或详情图视觉识别；商家展示信息仍需人工核对。</p>
       </details>
     </article>
   );

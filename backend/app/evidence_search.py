@@ -9,9 +9,9 @@ Two facts shape the design here:
 * Attribute statements and purchase conditions matter for a decision, so they stay complete.
 * Promotional copy is presentation, so only its count and a few examples are passed on.
 
-Evidence references are also stored once, not per line: the enrichment step attaches the same
-set of detail-image evidence ids to every recognised line, so repeating that set on each entry
-duplicated thousands of characters without identifying which image a line came from.
+New readings preserve each line's source images. Compact aligned reference arrays keep them
+citable without repeating whole image records. Legacy readings that share one broad evidence
+set retain the shared-reference summary without pretending to identify a single source panel.
 """
 
 from __future__ import annotations
@@ -65,6 +65,9 @@ def detail_research_summary(
     parameters: list[str] = []
     policies: list[str] = []
     claims: list[str] = []
+    parameter_refs: list[list[str]] = []
+    policy_refs: list[list[str]] = []
+    claim_refs: list[list[str]] = []
     for field in fields:
         kind = detail_kind(str(field.get("field_path") or ""))
         if kind is None:
@@ -74,10 +77,13 @@ def detail_research_summary(
             continue
         if kind == "parameter":
             parameters.append(value)
+            parameter_refs.append(list(_qualified_refs(field, ref_prefix)))
         elif kind == "policy":
             policies.append(value)
+            policy_refs.append(list(_qualified_refs(field, ref_prefix)))
         else:
             claims.append(value)
+            claim_refs.append(list(_qualified_refs(field, ref_prefix)))
     result: dict[str, object] = {}
     if parameters:
         result["detail_parameters"] = parameters
@@ -97,7 +103,13 @@ def detail_research_summary(
                 f"{DETAIL_REFERENCE_NOTE}共 {len(shared)} 条，此处列前若干条。"
             )
         else:
-            result["detail_refs_note"] = "各条识别结果自带引用，详见 evidence。"
+            result["detail_refs_note"] = "引用数组与各条原文顺序对应，图片出处详见 evidence。"
+            if parameters:
+                result["detail_parameter_refs"] = parameter_refs
+            if policies:
+                result["detail_policy_refs"] = policy_refs
+            if claims:
+                result["claim_summary"]["example_refs"] = claim_refs[:max_claim_examples]
     return result
 
 

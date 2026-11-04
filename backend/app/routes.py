@@ -1,23 +1,41 @@
+import base64
+import binascii
+import copy
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Sequence
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel
-from sqlalchemy import func, select
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.capture_urls import product_url_identity, safe_product_image_url
+from app.config import get_settings
 from app.database import get_session
+from app.detail_enrich import enrich_detail_screenshots
 from app.models import AgentRun, CaptureSnapshot, ProductItem, Task, utc_now
 from app.schemas import (
     AddItemRequest,
     CaptureSnapshotRead,
     CaptureSnapshotSubmit,
     CreateTaskRequest,
+    DetailScreenshotUpload,
+    DetailScreenshotUploadResponse,
     ItemInput,
     ItemRead,
     TaskRead,
@@ -30,6 +48,9 @@ from app.title_generation import generate_task_title
 router = APIRouter(prefix="/api/v1")
 SessionDependency = Annotated[Session, Depends(get_session)]
 IdempotencyHeader = Annotated[str | None, Header(alias="Idempotency-Key")]
+MAX_DETAIL_SCREENSHOT_REQUEST_BYTES = 12 * 1024 * 1024
+MAX_DETAIL_SCREENSHOT_BYTES = 4 * 1024 * 1024
+DETAIL_SCREENSHOT_BODY = Body(...)
 
 
 def canonical_payload(payload: BaseModel) -> str:
@@ -66,6 +87,7 @@ def capture_to_read(capture: CaptureSnapshot) -> CaptureSnapshotRead:
         item_id=capture.item_id,
         platform=capture.platform,
         received_at=capture.received_at,
+        detail_enrichment=capture.detail_enrichment,
     )
 
 
@@ -505,6 +527,210 @@ def list_capture_snapshots(
     ).all()
     response.headers["Cache-Control"] = "no-store"
     return [capture_to_read(capture) for capture in captures]
+
+
+@router.post(
+    "/tasks/{task_id}/items/{item_id}/captures/{snapshot_id}/detail-screenshots",
+    response_model=DetailScreenshotUploadResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["captures"],
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["page_url", "screenshots"],
+                        "properties": {
+                            "page_url": {"type": "string", "minLength": 8, "maxLength": 8192},
+                            "screenshots": {
+                                "type": "array",
+                                "description": (
+                                    "单次请求最多 16 段；同一快照可在前一批识别完成后"
+                                    "继续上传。"
+                                ),
+                                "minItems": 1,
+                                "maxItems": 16,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["position", "scroll_y", "image_base64"],
+                                    "properties": {
+                                        "position": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                        },
+                                        "scroll_y": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                        },
+                                        "image_base64": {
+                                            "type": "string",
+                                            "minLength": 1,
+                                            "maxLength": 650000,
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+def upload_detail_screenshots(
+    task_id: str,
+    item_id: str,
+    snapshot_id: str,
+    request: Request,
+    response: Response,
+    session: SessionDependency,
+    payload: dict = DETAIL_SCREENSHOT_BODY,
+) -> DetailScreenshotUploadResponse:
+    content_length = request.headers.get("content-length")
+    if (
+        content_length
+        and content_length.isdigit()
+        and int(content_length) > MAX_DETAIL_SCREENSHOT_REQUEST_BYTES
+    ):
+        raise HTTPException(status_code=413, detail="详情图截图总大小超过限制。")
+    try:
+        upload = DetailScreenshotUpload.model_validate(payload)
+    except ValidationError:
+        # Never echo the submitted image payload in validation errors or logs.
+        raise HTTPException(status_code=422, detail="详情图截图格式或大小无效。") from None
+
+    decoded: list[dict] = []
+    for frame in upload.screenshots:
+        try:
+            content = base64.b64decode(frame.image_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(status_code=422, detail="详情图截图编码无效。") from None
+        if (
+            len(content) < 4
+            or len(content) > MAX_DETAIL_SCREENSHOT_BYTES
+            or not content.startswith(b"\xff\xd8")
+            or not content.endswith(b"\xff\xd9")
+        ):
+            raise HTTPException(status_code=422, detail="只接受大小受限的 JPEG 详情图截图。")
+        decoded.append(
+            {"position": frame.position, "scroll_y": frame.scroll_y, "content": content}
+        )
+
+    item = session.scalar(
+        select(ProductItem).where(ProductItem.id == item_id, ProductItem.task_id == task_id)
+    )
+    snapshot = session.scalar(
+        select(CaptureSnapshot).where(
+            CaptureSnapshot.id == snapshot_id, CaptureSnapshot.item_id == item_id
+        )
+    )
+    if item is None or snapshot is None:
+        raise HTTPException(status_code=404, detail="商品或采集快照不存在。")
+    identities = [
+        product_url_identity(item.url),
+        product_url_identity(snapshot.page_url),
+        product_url_identity(upload.page_url),
+    ]
+    if (
+        any(
+            identity is None or identity.platform not in {"taobao", "tmall"}
+            for identity in identities
+        )
+        or len(
+            {(identity.platform, identity.product_id) for identity in identities if identity}
+        )
+        != 1
+    ):
+        raise HTTPException(status_code=422, detail="截图页面必须与已保存的淘宝或天猫商品一致。")
+
+    settings = get_settings()
+    if not settings.detail_vision_enabled:
+        raise HTTPException(status_code=409, detail="本机详情图识别尚未启用。")
+    if snapshot.detail_enrichment == "pending":
+        raise HTTPException(status_code=409, detail="该快照已有详情图识别任务，请稍后查看结果。")
+
+    signature_hash = hashlib.sha256()
+    for frame in decoded:
+        signature_hash.update(f"{frame['position']}:{frame['scroll_y']}:".encode())
+        signature_hash.update(frame["content"])
+    signature = signature_hash.hexdigest()
+    evidence_prefix = f"detail-shot-{signature[:24]}-"
+    evidence = snapshot.payload.get("evidence", [])
+    if any(entry.get("evidence_id", "").startswith(evidence_prefix) for entry in evidence):
+        response.headers["Cache-Control"] = "no-store"
+        return DetailScreenshotUploadResponse(
+            snapshot_id=snapshot.id, status="already_processed", screenshot_count=len(decoded)
+        )
+    snapshot_id_value = snapshot.id
+    safe_page_url = snapshot.page_url
+    queued = session.execute(
+        update(CaptureSnapshot)
+        .where(
+            CaptureSnapshot.id == snapshot_id_value,
+            CaptureSnapshot.detail_enrichment != "pending",
+        )
+        .values(detail_enrichment="pending")
+    )
+    if queued.rowcount != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="该快照已有详情图识别任务，请稍后查看结果。")
+    session.commit()
+    worker = threading.Thread(
+        target=_enrich_screenshot_snapshot,
+        args=(snapshot_id_value, safe_page_url, decoded, settings, signature),
+        daemon=True,
+        name="extension-detail-screenshot-vision",
+    )
+    try:
+        worker.start()
+    except RuntimeError:
+        session.execute(
+            update(CaptureSnapshot)
+            .where(CaptureSnapshot.id == snapshot_id_value)
+            .values(detail_enrichment="done")
+        )
+        session.commit()
+        raise HTTPException(status_code=503, detail="无法启动详情图识别，请稍后重试。") from None
+
+    response.headers["Cache-Control"] = "no-store"
+    return DetailScreenshotUploadResponse(
+        snapshot_id=snapshot_id_value, status="queued", screenshot_count=len(decoded)
+    )
+
+
+def _enrich_screenshot_snapshot(
+    snapshot_id: str,
+    page_url: str,
+    screenshots: list[dict],
+    settings,
+    signature: str,
+) -> None:
+    """Recognize temporary browser pixels, then keep only text and its page evidence."""
+    from app.database import create_session_factory, make_engine
+
+    engine = make_engine(settings.database_url)
+    try:
+        factory = create_session_factory(engine)
+        with factory() as session:
+            record = session.get(CaptureSnapshot, snapshot_id)
+            if record is None:
+                return
+            try:
+                enriched = enrich_detail_screenshots(
+                    copy.deepcopy(record.payload), screenshots, settings, page_url, signature
+                )
+                record.payload = enriched
+            except Exception:
+                # Image bytes are intentionally not retained if analysis fails.
+                pass
+            record.detail_enrichment = "done"
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 @router.patch(

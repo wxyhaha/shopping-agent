@@ -110,6 +110,29 @@ function samePage(left: URL, right: URL): boolean {
   return left.origin === right.origin && left.pathname === right.pathname && left.search === right.search;
 }
 
+async function captureVisibleProductTab(sender: Browser.runtime.MessageSender): Promise<string> {
+  const tabId = sender.tab?.id;
+  const windowId = sender.tab?.windowId;
+  const senderUrl = sender.url ?? sender.tab?.url;
+  if (tabId === undefined || windowId === undefined || windowId < 0 || sender.frameId !== 0 || !senderUrl) {
+    throw new Error("无法确认当前商品标签页，请从工具栏重新开始。");
+  }
+  const page = new URL(senderUrl);
+  const host = page.hostname.toLowerCase();
+  if (!isSupportedProductUrl(page.href) || !(host.endsWith(".taobao.com") || host.endsWith(".tmall.com"))) {
+    throw new Error("详情截图目前只支持淘宝和天猫商品页。");
+  }
+  const activeTabs = await browser.tabs.query({ active: true, windowId });
+  if (activeTabs[0]?.id !== tabId || !activeTabs[0].url || !samePage(new URL(activeTabs[0].url), page)) {
+    throw new Error("商品页已切换，详情截图已停止。");
+  }
+  try {
+    return await browser.tabs.captureVisibleTab(windowId, { format: "jpeg", quality: 88 });
+  } catch {
+    throw new Error("浏览器没有授予当前页面截图权限。请点击扩展工具栏图标后重试。");
+  }
+}
+
 function productKey(value: string): string | null {
   try {
     const url = new URL(value);
@@ -358,6 +381,16 @@ async function pollAllProductTabs(): Promise<void> {
 
 export default defineBackground(() => {
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (isRecord(message) && message.type === "shopping-agent:capture-visible-tab") {
+      void captureVisibleProductTab(sender).then(
+        (screenshot_url) => sendResponse({ ok: true, screenshot_url }),
+        (cause) => sendResponse({
+          ok: false,
+          error: cause instanceof Error ? cause.message.trim() : "无法截图当前详情图区域。",
+        }),
+      );
+      return true;
+    }
     const request = parseRequest(message);
     if (!request) return;
     void handleRequest(request, sender).then(sendResponse, () => {

@@ -447,6 +447,119 @@
         }
       }
     },
+    "/api/v1/tasks/{task_id}/items/{item_id}/captures/{snapshot_id}/detail-screenshots": {
+      "post": {
+        "tags": [
+          "captures"
+        ],
+        "summary": "Upload Detail Screenshots",
+        "operationId": "upload_detail_screenshots_api_v1_tasks__task_id__items__item_id__captures__snapshot_id__detail_screenshots_post",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item Id"
+            }
+          },
+          {
+            "name": "snapshot_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Snapshot Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "title": "Payload",
+                "required": [
+                  "page_url",
+                  "screenshots"
+                ],
+                "properties": {
+                  "page_url": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 8192
+                  },
+                  "screenshots": {
+                    "type": "array",
+                    "description": "单次请求最多 16 段；同一快照可在前一批识别完成后继续上传。",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "position",
+                        "scroll_y",
+                        "image_base64"
+                      ],
+                      "properties": {
+                        "position": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "scroll_y": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "image_base64": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 650000
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailScreenshotUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/tasks/{task_id}/items/{item_id}": {
       "patch": {
         "tags": [
@@ -1398,6 +1511,18 @@
               "capture_failed"
             ],
             "title": "Error Code"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
           }
         },
         "additionalProperties": false,
@@ -1592,6 +1717,17 @@
               }
             ],
             "title": "Error"
+          },
+          "entry_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Note"
           }
         },
         "type": "object",
@@ -1810,7 +1946,6 @@
               "type": "string"
             },
             "type": "array",
-            "maxItems": 20,
             "title": "Evidence Ids"
           }
         },
@@ -1841,6 +1976,8 @@
               "json_ld",
               "user_confirmed",
               "image_metadata",
+              "detail_image_vision",
+              "extension_screenshot",
               "navigation"
             ],
             "title": "Source"
@@ -2076,7 +2213,6 @@
               "$ref": "#/components/schemas/CaptureEvidenceInput"
             },
             "type": "array",
-            "maxItems": 500,
             "title": "Evidence"
           },
           "coverage": {
@@ -2107,6 +2243,14 @@
           "received_at": {
             "type": "string",
             "title": "Received At"
+          },
+          "detail_enrichment": {
+            "type": "string",
+            "enum": [
+              "done",
+              "pending"
+            ],
+            "title": "Detail Enrichment"
           }
         },
         "additionalProperties": false,
@@ -2121,7 +2265,8 @@
           "id",
           "item_id",
           "platform",
-          "received_at"
+          "received_at",
+          "detail_enrichment"
         ],
         "title": "CaptureSnapshotRead"
       },
@@ -2233,7 +2378,6 @@
               "$ref": "#/components/schemas/CaptureEvidenceInput"
             },
             "type": "array",
-            "maxItems": 500,
             "title": "Evidence"
           },
           "coverage": {
@@ -2281,6 +2425,11 @@
             "type": "boolean",
             "const": false,
             "title": "Requires Open Product Page",
+            "default": false
+          },
+          "jd_background_enabled": {
+            "type": "boolean",
+            "title": "Jd Background Enabled",
             "default": false
           }
         },
@@ -2364,6 +2513,36 @@
           "items"
         ],
         "title": "CreateTaskRequest"
+      },
+      "DetailScreenshotUploadResponse": {
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "title": "Snapshot Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "already_processed"
+            ],
+            "title": "Status"
+          },
+          "screenshot_count": {
+            "type": "integer",
+            "maximum": 16.0,
+            "minimum": 0.0,
+            "title": "Screenshot Count",
+            "description": "当前请求批次接收的截图段数。"
+          }
+        },
+        "type": "object",
+        "required": [
+          "snapshot_id",
+          "status",
+          "screenshot_count"
+        ],
+        "title": "DetailScreenshotUploadResponse"
       },
       "Finding": {
         "properties": {

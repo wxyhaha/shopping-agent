@@ -54,7 +54,8 @@ SYSTEM_PROMPT = """你是购物研究 Agent，围绕用户用途和硬条件研�
 等待页面加载并滚动采集，然后根据返回的新证据继续判断。用户要求补采集时优先使用该工具。
 后台采集不要求用户打开商品页或安装扩展。每次研究最多后台采集三次；
 新快照仍缺关键字段时不要无效重复，改用 ask_user 确认或给出阶段性结果。
-后台使用独立浏览器会话，不共享日常 Chrome/Edge 登录态。工具返回登录或验证受阻时如实解释；
+后台使用独立会话，或在显式配置后接管用户启动的专用浏览器；以工具返回的采集方式和访问结果为准。
+工具返回登录或验证受阻时如实解释；
 优先说明工作台提供“打开登录窗口”，用户手动登录后点“保存并继续研究”可重试后台采集。
 保存会话不证明登录有效，也不证明任何商品规格，仍应重新访问核实。
 可以让用户用已登录商品页及扩展接管，再调用 capture_product_page 读取已打开的匹配页面。
@@ -74,14 +75,19 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 不等于已确认 SKU 专属价格或最终支付价。price_binding=unknown 时不能声称价格适用于所选规格。
 程序只操作已登记的规格选项，不操作购物按钮。规格不存在、存在多种合理匹配或登录验证时才请用户接管。
 用户回答作为用户陈述，与商家页面证据区别对待。
-如果用户回答是在请求补采集，不要把该请求当作规格或价格已确认。重复读取同一 snapshot_id
-不是重新访问网页，也没有获取新证据；freshness 返回 same_snapshot 时应明确仍是原有资料。
+如果用户回答是在请求补采集，不要把该请求当作规格或价格已确认。读取快照不会重新访问网页；
+同一 snapshot_id 可能被异步补全，只有 freshness 返回 same_snapshot 时才表示内容未变。
 当前工具能读取已保存快照、后台打开任务内商品页采集、请求扩展补采集和向用户确认；
-可以受控选择已读取的规格选项、搜索替代商品；不能读取图片内容。
+可以受控选择已读取的规格选项、搜索替代商品；开启视觉识别后，工具可返回详情图文字。
+只有工具实际返回的图片文字才可使用；未识别部分保持未知。
 用户要求替代商品时，先用 set_search_requirements 登记原商品、硬条件和偏好；
 硬条件来自用户需求和已读取证据，不得擅自增加限制。需求足够明确时直接搜索，不反复请求确认。
 有歧义或用户要求修改条件时使用 ask_user，回答后更新登记条件。
-使用 search_products 搜索淘宝或京东，每次最多返回第一页五条直接商品链接，每研究最多四次搜索。
+使用 search_products 搜索淘宝或京东，每次最多返回第一页五条商品线索，每研究最多四次搜索。
+搜索可使用显式配置的专用浏览器登录态；工具 note 会说明实际通道与受阻原因。
+候选 identity_source 为 direct_link 或 sku_card；后者是从已识别商品卡片的 SKU 得到的详情入口，
+仅证明搜索页出现此候选，不能证明其品牌、规格或价格。搜索要求验证时需在同一专用浏览器手动完成，
+日常浏览器的登录或验证状态不能自动作为后台可访问的证明。
 搜索标题只作线索，不是详情事实。选择候选 ID 调用 adopt_search_candidate 加入任务，最多三个候选；
 随后调用 collect_product_page/规格工具核实详情。搜索失败或登录受阻不等于没有候选；
 可以换平台或查询，达到边界则说明检索范围和未知项。不得声称全网最低或遍历整个平台。
@@ -99,11 +105,15 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 引用详情图内容时标注"详情图"来源，不要把它与 DOM 中的结构化规格等同。
 详情图的参数与购买条件会完整给出，宣传类内容只给数量与示例；需要某条宣传原文或核对某个
 属性时，用 search_product_evidence 按关键词检索，不要为此重新读取整份快照。
+detail_parameter_refs 和 detail_policy_refs 分别与参数和购买条件按相同顺序对应；
+已有原文与对应引用足以支持说明时直接引用，不要为每条已取得的参数再次检索。
 后台返回 blocked/failed 表示访问受阻或失败，不是商品规格证据；不要仅凭标题给出确定推荐。
 error_code 为 risk_control 表示平台风控拦截，不是登录或验证问题，建议重新登录无效；
 此时应建议稍后重试或改用扩展接管，不要声称用户登录后即可访问。
-京东商品的规格参数只有扩展通道能读取：后台采集在自动化环境中拿不到参数表，
-因此京东任务应使用 capture_product_page（需要用户已打开该商品页），不要用后台采集代替。
+京东自动访问可被显式停用。工具返回 jd_automation_disabled 时，本次没有访问平台；
+不要重试其他后台通道或让用户继续登录。使用已有证据；若日常浏览器也受限，等待恢复或请用户补充已有资料。
+只有用户明确表示已正常打开商品页并愿意用扩展接管时，才调用 capture_product_page；
+资料仍不足则提交 needs_evidence，不把停用或缺失当成商品不具备某属性。
 每次只调用一个工具。每条 finding 必须引用工具实际返回的完整 evidence ref，
 不能把页面 SKU 编号当作已确认的规格。完成后调用 submit_report，给出有依据的取舍与未知项。
 报告要让用户可以据此做选择，而不是重复商品标题。summary 使用 2–4 个短段落，先直接回答，
@@ -146,7 +156,8 @@ TOOLS = [
     ),
     tool_schema(
         "search_products",
-        "后台搜索淘宝或京东第一页，返回有来源的候选 ID；搜索标题不能证明详情。",
+        "搜索淘宝或京东第一页，可复用显式配置的专用浏览器；"
+        "返回有来源的链接/商品卡片候选 ID，搜索标题不能证明详情。",
         SearchProductsArgs,
     ),
     tool_schema(
@@ -184,8 +195,8 @@ TOOLS = [
     tool_schema(
         "capture_product_page",
         "请求扩展重新读取已打开的同一商品页，等待新快照或明确的超时失败。"
-        "扩展运行在用户真实浏览器中，可展开折叠的规格参数表；京东的价格与规格参数"
-        "只有该通道能读取，后台采集会缺少规格参数。",
+        "扩展运行在用户真实浏览器中，可展开折叠的规格参数表。"
+        "仅在用户确认已正常打开商品页并愿意接管时使用；访问受限时不能靠此工具绕过。",
         CaptureProductPageArgs,
     ),
     tool_schema("ask_user", "向用户确认影响判断的关键条件，持久化暂停并等待回答。", AskUserArgs),
@@ -266,6 +277,31 @@ def compact_evidence(entries: list[dict]) -> list[dict]:
     return compacted
 
 
+def evidence_version(snapshot: CaptureSnapshot) -> str:
+    """Async image enrichment can change the content without changing the snapshot ID."""
+    content = json.dumps(
+        {"payload": snapshot.payload, "enrichment": snapshot.detail_enrichment},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def image_read_note(snapshot: CaptureSnapshot) -> str:
+    count = sum(
+        entry.get("source") == "detail_image_vision"
+        for entry in snapshot.payload.get("evidence", [])
+    )
+    if count:
+        return (
+            f"已取得 {count} 张详情图的文字识别结果，属商家表述，未经独立核实；"
+            "读取覆盖与失败见 coverage，不能推断其余图片已读取。"
+        )
+    if snapshot.detail_enrichment == "pending":
+        return "详情图文字识别尚未完成；图片来源和尺寸不能证明图片中的规格。"
+    return "当前快照没有可用的详情图文字识别结果；图片来源和尺寸不能证明图片中的规格。"
+
+
 class AgentState(TypedDict):
     messages: list[dict]
     turns: int
@@ -275,6 +311,7 @@ class AgentState(TypedDict):
     seen_evidence: dict
     read_items: list[str]
     read_snapshots: dict[str, str]
+    read_versions: dict[str, str]
     calculation_reviewed: bool
     price_comparisons: list[dict]
     item_ids: list[str]
@@ -552,6 +589,7 @@ class ResearchRuntime(SearchRuntimeMixin):
             return {
                 "item_id": item_id,
                 "snapshot_id": snapshot.id,
+                "evidence_version": evidence_version(snapshot),
                 "status": snapshot.status,
                 "captured_at": snapshot.captured_at.isoformat(),
                 # Detail-image findings carry almost the whole payload once a page has ~30
@@ -566,7 +604,7 @@ class ResearchRuntime(SearchRuntimeMixin):
                 "observation_limits": PRICE_OBSERVATION_LIMITS,
                 "coverage": compact_coverage(payload.get("coverage", [])),
                 "evidence": evidence,
-                "image_note": "图片内容未读取；图片来源和尺寸不能证明图片中的规格。",
+                "image_note": image_read_note(snapshot),
             }, refs
 
     def _latest_snapshot(self, task_id: str, item_id: str) -> CaptureSnapshot | None:
@@ -582,7 +620,11 @@ class ResearchRuntime(SearchRuntimeMixin):
             )
 
     def _repeat_read(
-        self, task_id: str, item_id: str, expected_snapshot_id: str
+        self,
+        task_id: str,
+        item_id: str,
+        expected_snapshot_id: str,
+        expected_version: str | None = None,
     ) -> tuple[dict, dict]:
         """Confirm an unchanged snapshot without repeating its whole content.
 
@@ -594,9 +636,16 @@ class ResearchRuntime(SearchRuntimeMixin):
         snapshot = self._latest_snapshot(task_id, item_id)
         if snapshot is None:
             return {"error": "商品不属于此任务。"}, {}
+        version = evidence_version(snapshot)
+        if snapshot.id != expected_snapshot_id or version != expected_version:
+            # A new capture or a completed asynchronous read must actually reach the model,
+            # not merely move its read pointer to data it never received. Old checkpoints
+            # without a content version get one full refresh on their first resumed read.
+            return self._read_evidence(task_id, item_id, snapshot.id)
         base = {
             "item_id": item_id,
             "snapshot_id": snapshot.id,
+            "evidence_version": version,
             "status": snapshot.status,
             "captured_at": snapshot.captured_at.isoformat(),
             "freshness": "same_snapshot",
@@ -606,13 +655,10 @@ class ResearchRuntime(SearchRuntimeMixin):
             # turn can report the label as a final price.
             "observation_limits": PRICE_OBSERVATION_LIMITS,
         }
-        if snapshot.id == expected_snapshot_id:
-            base["note"] = (
-                "内容与本次研究已读取的相同，未重复返回。"
-                "如需某条详情图原文（参数、宣传或购买条件），用 search_product_evidence 检索。"
-            )
-        else:
-            base["note"] = "快照已更新，请重新读取以获取新内容。"
+        base["note"] = (
+            "内容与本次研究已读取的相同，未重复返回。"
+            "如需某条详情图原文（参数、宣传或购买条件），用 search_product_evidence 检索。"
+        )
         return base, {}
 
     def _search_evidence(
@@ -878,7 +924,28 @@ class ResearchRuntime(SearchRuntimeMixin):
                 None,
             )
             output["access_code"] = access_code
-            if access_code == "risk_control":
+            if access_code == "jd_automation_disabled":
+                output.update(
+                    {
+                        "mode": "handoff_required",
+                        "freshness": "not_visited",
+                        "retrieval_note": (
+                            "本次仅记录京东自动访问暂停状态，没有访问商品页或取得新商品事实。"
+                        ),
+                        "error": access_note,
+                    }
+                )
+            elif access_code in {
+                "invalid_snapshot",
+                "browser_error",
+                "browser_timeout",
+                "worker_exception",
+                "worker_failed",
+                "oversized_snapshot",
+                "collection_timeout",
+            }:
+                output["error"] = f"采集工具失败：{access_note}。这不是登录结论，请保留资料缺项。"
+            elif access_code == "risk_control":
                 # A risk block is not fixed by logging in; say so instead of suggesting it.
                 output["error"] = (
                     f"后台采集被平台风控拦截：{access_note}。"
@@ -1001,7 +1068,16 @@ class ResearchRuntime(SearchRuntimeMixin):
                 raise AgentFailure("已达到 24 次模型调用上限，请缩小目标后新建研究。")
             event_id = f"model-{uuid4()}"
             self._emit(run_id, event_id, "model", "模型正在决定下一步", {"status": "running"})
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}, *state["messages"][1:]]
+            remaining = max(0, int(deadline - time.monotonic()))
+            budget_note = (
+                f"\n当前执行片段剩余约 {remaining} 秒。请预留两次模型调用用于报告核算与定稿。"
+                "若剩余不超过 60 秒，应停止非必要检索，立即用已有证据调用 submit_report；"
+                "关键条件未解决则提交 needs_evidence，不能为赶进度补造事实。"
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT + budget_note},
+                *state["messages"][1:],
+            ]
             started = time.monotonic()
             try:
                 message, usage = self.model_call(messages, model)
@@ -1045,6 +1121,7 @@ class ResearchRuntime(SearchRuntimeMixin):
             refs = dict(state["seen_evidence"])
             read_items = list(state["read_items"])
             read_snapshots = dict(state.get("read_snapshots", {}))
+            read_versions = dict(state.get("read_versions", {}))
             calculation_reviewed = bool(state.get("calculation_reviewed", False))
             price_comparisons = list(state.get("price_comparisons", []))
             requirements = state.get("search_requirements")
@@ -1091,7 +1168,12 @@ class ResearchRuntime(SearchRuntimeMixin):
                         # Re-sending the whole snapshot on every read made a two-product run
                         # grow without bound. The earlier content is still in the transcript,
                         # so a repeat only needs to confirm nothing changed.
-                        result, new_refs = self._repeat_read(task_id, payload.item_id, already_read)
+                        result, new_refs = self._repeat_read(
+                            task_id,
+                            payload.item_id,
+                            already_read,
+                            read_versions.get(payload.item_id),
+                        )
                     else:
                         result, new_refs = self._read_evidence(task_id, payload.item_id)
                     snapshot_id = result.get("snapshot_id")
@@ -1110,6 +1192,7 @@ class ResearchRuntime(SearchRuntimeMixin):
                             else "首次读取这份已保存快照；本工具没有访问商品页。",
                         )
                         read_snapshots[payload.item_id] = snapshot_id
+                        read_versions[payload.item_id] = result["evidence_version"]
                     refs.update(new_refs)
                     if "error" not in result and payload.item_id not in read_items:
                         read_items.append(payload.item_id)
@@ -1149,6 +1232,8 @@ class ResearchRuntime(SearchRuntimeMixin):
                             calculation_reviewed = False
                             price_comparisons = []
                         read_snapshots[payload.item_id] = result["snapshot_id"]
+                        if result.get("evidence_version"):
+                            read_versions[payload.item_id] = result["evidence_version"]
                         if payload.item_id not in read_items:
                             read_items.append(payload.item_id)
                 elif name == "ask_user":
@@ -1240,6 +1325,7 @@ class ResearchRuntime(SearchRuntimeMixin):
                 "seen_evidence": refs,
                 "read_items": read_items,
                 "read_snapshots": read_snapshots,
+                "read_versions": read_versions,
                 "calculation_reviewed": calculation_reviewed,
                 "price_comparisons": price_comparisons,
                 "search_requirements": requirements,
@@ -1355,6 +1441,7 @@ class ResearchRuntime(SearchRuntimeMixin):
                     "seen_evidence": {},
                     "read_items": [],
                     "read_snapshots": {},
+                    "read_versions": {},
                     "calculation_reviewed": False,
                     "price_comparisons": [],
                     "item_ids": [item["item_id"] for item in manifest],

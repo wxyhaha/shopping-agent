@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # because it uses a browser outside this process and only works while it is running.
     browser_cdp_enabled: bool = False
     browser_cdp_url: str = "http://127.0.0.1:9222"
+    # JD access is paused after the user's account restriction. Re-enabling browser work
+    # requires an explicit local opt-in; it must never silently retry another login channel.
+    jd_background_enabled: bool = False
 
     @property
     def browser_session_dir(self) -> Path:

@@ -25,6 +25,7 @@ from app.collection_process import (
 from app.config import Settings
 from app.detail_enrich import enrich_detail_images
 from app.models import utc_now
+from app.native_network import NativeRequestGuard
 from app.price_vision import looks_obfuscated, read_rendered_price
 from app.schemas import CaptureSnapshotSubmit
 from app.spec_panel import expand_spec_panel
@@ -61,7 +62,7 @@ PAGE_SIGNALS = """() => ({
     title: document.title,
     text: (document.body?.innerText || '').slice(0, 8000),
     hasProduct: Boolean(document.querySelector(
-      '.sku-name, #J_ImgBooth, .picGalleryEle, [class*="SkuPanel"]')) ||
+      '.sku-name, .sku-title-text, #J_ImgBooth, .picGalleryEle, [class*="SkuPanel"]')) ||
       [...document.querySelectorAll('h1')].some(el => (el.innerText || '').trim().length >= 8)
 })"""
 
@@ -128,42 +129,18 @@ DETAIL_SECTION_PROBE = """
   return count;
 }
 """
-# Counts the containers themselves. Used once before a long wait: a page with no container at
-# all will not grow one, so waiting the full budget there only delays the result.
-DETAIL_CONTAINER_PROBE = """
-() => {
-  const selectors = ['#J_DivItemDesc', '#description', '#detailContent', '#detail',
-    "[class*='descV8']", "[class*='detail-content']", "[class*='detailContent']",
-    '.page-content-area'];
-  let count = 0;
-  for (const selector of selectors) count += document.querySelectorAll(selector).length;
-  return count;
-}
-"""
 
 
 def wait_for_detail_images(page, deadline: float, check_cancel, wait_seconds=None) -> str:
     """Wait until the detail section has images, and say which happened.
 
-    Returning one of ``ready`` / ``empty`` / ``timeout`` separates "the page has no detail
-    section" from "it had not rendered yet", so a missing read is not mistaken for an absent
-    section. The wait never takes more than its own budget nor more than what is left of the
-    collection, so a slow page still returns instead of overrunning the deadline.
+    A missing container may still be injected later. Expiry means "not observed in time",
+    never "the page has no detail section". Leave time for parsing the captured page.
     """
     now = time.monotonic()
     remaining = deadline - now
     if remaining <= 1.0:
         return "timeout"
-    # Check once before committing to a long wait. With no container at all the page will not
-    # grow one, so waiting the full budget only delays the result. A container that exists but
-    # holds no images also gets a short grace period rather than the full budget: that is the
-    # shape of a synthetic fixture whose detail block is text only.
-    try:
-        containers = int(page.evaluate(DETAIL_CONTAINER_PROBE) or 0)
-    except PlaywrightError:
-        return "timeout"
-    if containers == 0:
-        return "empty"
     # Leave a margin for parsing and for the deadline check that follows, but otherwise use
     # the wait budget: the section can take far longer than the scroll pass to appear.
     budget = min(
@@ -181,7 +158,7 @@ def wait_for_detail_images(page, deadline: float, check_cancel, wait_seconds=Non
         if seen > 0:
             return "ready"
         if time.monotonic() >= limit:
-            return "empty"
+            return "timeout"
         # Keep the page moving while watching. The section is injected on scroll, and staying
         # still at one position is what left the page at 3 600 px on earlier attempts.
         try:
@@ -457,8 +434,26 @@ class BackgroundCollector:
                 "parser_built": COLLECTOR_SCRIPT.is_file(),
                 "mode": "headless",
                 "requires_open_product_page": False,
+                "jd_background_enabled": self.settings.jd_background_enabled,
             }
         return dict(self._availability)
+
+    def _handoff(self, identity) -> CollectionResult | None:
+        if (
+            identity.platform == "jd"
+            and not self.settings.jd_background_enabled
+            and self.route_fixture is None
+        ):
+            note = (
+                "京东后台自动访问已暂停，本次没有访问商品页。"
+                "请等待平台恢复，或补充已合法取得的商品资料；不需要继续尝试登录。"
+            )
+            return CollectionResult(
+                unavailable_snapshot(identity, "jd_automation_disabled", note),
+                "jd_automation_disabled",
+                note,
+            )
+        return None
 
     def collect(
         self, url: str, *, check_cancel: Callable[[], None] = lambda: None, variant_request=None
@@ -468,6 +463,8 @@ class BackgroundCollector:
             return CollectionResult(
                 None, "unsupported_url", "仅支持任务内淘宝、天猫和京东商品详情链接。"
             )
+        if handoff := self._handoff(identity):
+            return handoff
         if not self.availability()["available"]:
             return CollectionResult(
                 None, "browser_unavailable", "后台浏览器或共享采集器未安装，请检查服务配置。"
@@ -489,6 +486,7 @@ class BackgroundCollector:
                         "data_dir": self.settings.data_dir.as_posix(),
                         "browser_timeout_seconds": self.settings.browser_timeout_seconds,
                         "browser_max_scrolls": self.settings.browser_max_scrolls,
+                        "browser_detail_wait_seconds": self.settings.browser_detail_wait_seconds,
                         "browser_trust_fake_ip_dns": self.settings.browser_trust_fake_ip_dns,
                         # The worker captures the price pixels; this process reads them,
                         # because only it holds the model credentials.
@@ -497,6 +495,7 @@ class BackgroundCollector:
                         # travel with it; the worker reads no .env of its own.
                         "browser_cdp_enabled": self.settings.browser_cdp_enabled,
                         "browser_cdp_url": self.settings.browser_cdp_url,
+                        "jd_background_enabled": self.settings.jd_background_enabled,
                         # The worker decides whether a detail read is still owed, so it must
                         # know the switch; otherwise it always reports "nothing pending".
                         "detail_vision_enabled": self.settings.detail_vision_enabled,
@@ -644,6 +643,11 @@ class BackgroundCollector:
         return raw
 
     def _collect(self, identity, original_url, deadline, check_cancel, variant_request=None):
+        # Keep the gate inside the worker path too: an older parent process may still send
+        # requests without the new setting. The safe default must stop them before any DNS.
+        if handoff := self._handoff(identity):
+            return handoff
+
         def remaining_ms(limit=15000):
             check_cancel()
             remaining = int((deadline - time.monotonic()) * 1000)
@@ -693,11 +697,7 @@ class BackgroundCollector:
                     headless=True, timeout=remaining_ms(), args=browser_args
                 )
             try:
-                if attached:
-                    # The shared context is the user's own session; only a page this run opens
-                    # is touched, and its cookie jar is not replaced.
-                    context.set_default_timeout(remaining_ms())
-                else:
+                if not attached:
                     state_path = (
                         self.settings.browser_session_dir
                         / f"{session_name(identity.platform)}.json"
@@ -777,21 +777,32 @@ class BackgroundCollector:
                     # valid. Visiting the site's own front page first establishes the session
                     # so the product page loads normally. Measured: without this the same
                     # product page redirected to login.taobao.com every time.
+                    warm = None
                     try:
                         warm = context.new_page()
+                        NativeRequestGuard(warm, policy)
                         warm.goto(
                             session_home_url(identity.platform),
                             wait_until="domcontentloaded",
                             timeout=remaining_ms(15000),
                         )
                         warm.wait_for_timeout(1200)
-                        warm.close()
                     except (PlaywrightError, PlaywrightTimeout):
                         # A failed warm-up must not decide the collection; the product page
                         # navigation below still reports its own outcome.
                         pass
+                    finally:
+                        if warm is not None:
+                            warm.close()
                 page = context.new_page()
-                if attached:
+                page.set_default_timeout(remaining_ms())
+                native_guard = None
+                if attached and self.route_fixture is None:
+                    native_guard = NativeRequestGuard(
+                        page, policy, lambda url: navigation_destination(url, identity)
+                    )
+                    page.route_web_socket("**/*", lambda route: None)
+                elif attached:
                     # Route on this page only. Routing the shared context would also filter
                     # the tabs the user is browsing in the same window.
                     page.route("**/*", route_request)
@@ -802,7 +813,7 @@ class BackgroundCollector:
                     # synchronous close inside this callback can deadlock the driver's
                     # dispatch greenlet.
                     context.route_web_socket("**/*", lambda route: None)
-                context.on("page", lambda popup: popup.close())
+                page.on("popup", lambda popup: popup.close())
                 timed_out = False
                 response = None
                 try:
@@ -811,6 +822,9 @@ class BackgroundCollector:
                     )
                 except PlaywrightTimeout:
                     timed_out = True
+                except PlaywrightError:
+                    if native_guard is None or not native_guard.navigation_gate:
+                        raise
                 check_cancel()
                 # readyState is not a usable signal here: on Tmall item pages it reaches
                 # "complete" at about 800 ms while the document is still 3 643 px tall, against
@@ -820,8 +834,12 @@ class BackgroundCollector:
                 # watches for the content.
                 page.wait_for_timeout(remaining_ms(1200))
                 signals = reading_signals(page)
-                gate = navigation_gate or access_gate(
-                    page.url, signals, identity, response.status if response else None
+                gate = (
+                    navigation_gate
+                    or (native_guard and native_guard.navigation_gate)
+                    or access_gate(
+                        page.url, signals, identity, response.status if response else None
+                    )
                 )
                 if gate:
                     code, marker = gate
@@ -884,7 +902,7 @@ class BackgroundCollector:
                         f"() => {{\n{script}\nreturn ShoppingAgentCollector.collect();\n}}"
                     )
                 raw["adapter_id"] = f"{identity.platform}-playwright"
-                raw["adapter_version"] = "0.2.0"
+                raw["adapter_version"] = "0.3.1"
                 if expanded:
                     # Recorded as a note on the loading step: expanding a tab is an action,
                     # not page evidence, so it must not claim to cite the specification table.
@@ -903,10 +921,8 @@ class BackgroundCollector:
                             "field_path": "page.detail_loading",
                             "status": "ambiguous",
                             "note": (
-                                f"等待 {int(DETAIL_WAIT_SECONDS)} 秒后仍未看到详情图区域，"
-                                "按页面没有该区域记录（可能尚未加载或被折叠）。"
-                                if detail_state == "empty"
-                                else "等待详情图区域时页面读取中断，未确认该区域是否存在。"
+                                "在本次采集等待期限内未看到详情图区域；"
+                                "可能尚未加载、被折叠或页面读取中断，不能据此判断页面没有详情图。"
                             ),
                         }
                     )

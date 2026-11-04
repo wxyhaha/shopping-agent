@@ -120,6 +120,8 @@ EvidenceSource = Literal[
     # Text read out of product detail artwork by a vision model. Kept distinct because it is
     # merchant marketing copy, not a measured attribute.
     "detail_image_vision",
+    # Pixels cropped from a user-triggered browser screenshot; the original is not persisted.
+    "extension_screenshot",
     "navigation",
 ]
 PriceKind = Literal[
@@ -276,7 +278,7 @@ class CaptureCoverageInput(BaseModel):
     field_path: str = Field(pattern=_FIELD_PATH_PATTERN)
     status: CaptureFieldStatus
     note: str | None = Field(default=None, max_length=512)
-    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+    evidence_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_coverage(self) -> "CaptureCoverageInput":
@@ -303,7 +305,7 @@ class CaptureSnapshotSubmit(BaseModel):
     variant_verification: VariantVerification | None = None
     prices: list[PriceObservationInput] = Field(default_factory=list, max_length=50)
     images: list[ImageObservationInput] = Field(default_factory=list, max_length=200)
-    evidence: list[CaptureEvidenceInput] = Field(default_factory=list, max_length=500)
+    evidence: list[CaptureEvidenceInput] = Field(default_factory=list)
     coverage: list[CaptureCoverageInput] = Field(default_factory=list, max_length=200)
 
     @field_validator("page_url", "canonical_url")
@@ -437,9 +439,44 @@ class CaptureSnapshotRead(CaptureSnapshotSubmit):
     item_id: str
     platform: Literal["taobao", "tmall", "jd"]
     received_at: datetime
+    detail_enrichment: Literal["done", "pending"]
 
     @field_serializer("received_at")
     def serialize_received_at(self, value: datetime) -> str:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class DetailScreenshotFrameInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    position: int = Field(ge=1)
+    scroll_y: int = Field(ge=0)
+    image_base64: str = Field(min_length=1, max_length=650_000)
+
+
+class DetailScreenshotUpload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page_url: str = Field(min_length=8, max_length=8192)
+    screenshots: list[DetailScreenshotFrameInput] = Field(
+        min_length=1,
+        max_length=16,
+        description="单次请求最多 16 段；同一快照可在前一批识别完成后继续上传。",
+    )
+
+    @model_validator(mode="after")
+    def validate_screenshot_positions(self) -> "DetailScreenshotUpload":
+        positions = [frame.position for frame in self.screenshots]
+        if len(positions) != len(set(positions)):
+            raise ValueError("截图片段位置不能重复。")
+        if sum(len(frame.image_base64) for frame in self.screenshots) > 10_400_000:
+            raise ValueError("截图总大小超过限制。")
+        return self
+
+
+class DetailScreenshotUploadResponse(BaseModel):
+    snapshot_id: str
+    status: Literal["queued", "already_processed"]
+    screenshot_count: int = Field(ge=0, le=16, description="当前请求批次接收的截图段数。")

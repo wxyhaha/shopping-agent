@@ -227,8 +227,8 @@ def read_detail_batch(
     """Read several images in one request.
 
     Returns ``({index: (parameters, claims, policies)}, note)`` where ``index`` is the
-    zero-based position in ``images``. Items whose ``image`` field cannot be trusted are
-    attributed to the whole batch, which is why the caller also keeps per-image evidence.
+    zero-based position in ``images``. ``-1`` means the text belongs to the batch but its
+    individual source image could not be determined; callers must not assign it to image 0.
     """
     if not images:
         return {}, "没有可读取的详情图。"
@@ -266,7 +266,9 @@ def read_detail_batch(
         parameters, claims, policies = parse_detail_items(reply)
         if not parameters and not claims and not policies:
             return {}, "批量读取未识别到文字。"
-        return {0: (parameters, claims, policies)}, "批量结果无法定位到单张图，归入首张。"
+        return {
+            -1: ([], parameters + claims + policies, [])
+        }, "批量结果无法定位到单张图，仅作批次文案。"
 
     grouped: dict[int, tuple[list[str], list[str], list[str]]] = {}
     buckets: dict[int, tuple[list[str], list[str], list[str]]] = {}
@@ -278,7 +280,9 @@ def read_detail_batch(
             continue
         bucket, value = cleaned
         raw_index = item.get("image")
-        index = raw_index - 1 if isinstance(raw_index, int) and 1 <= raw_index <= len(images) else 0
+        index = raw_index - 1 if type(raw_index) is int and 1 <= raw_index <= len(images) else -1
+        if index == -1:
+            bucket = "claim"
         entry = buckets.setdefault(index, ([], [], []))
         lists = {"parameter": entry[0], "claim": entry[1], "policy": entry[2]}
         lists[bucket].append(value)

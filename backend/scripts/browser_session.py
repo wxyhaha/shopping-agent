@@ -14,6 +14,8 @@ def main():
     parser.add_argument("platform", choices=["taobao", "jd"])
     args = parser.parse_args()
     settings = get_settings()
+    if args.platform == "jd" and not settings.jd_background_enabled:
+        raise SystemExit("京东自动访问和独立登录已暂停，请勿继续尝试登录。")
     directory = settings.browser_session_dir
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     state_path = directory / f"{args.platform}.json"

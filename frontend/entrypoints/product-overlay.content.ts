@@ -3,7 +3,8 @@ import { createShadowRootUi } from "wxt/utils/content-script-ui/shadow-root";
 import type { ContentScriptContext } from "wxt/utils/content-script-context";
 import type { components } from "../src/api/schema";
 import { collectCurrentProductSnapshot, getCurrentProductTitle } from "../src/extension/capture-adapters";
-import { expandSpecPanel } from "../src/extension/spec-panel";
+import { captureOpenedProduct, captureOpenedProductWithScreenshots } from "../src/extension/page-capture";
+import { captureSummary } from "../src/extension/capture-preparation";
 import { pollCaptureBridge } from "../src/extension/capture-bridge";
 import { LAST_TASK_STORAGE_KEY } from "../src/extension/config";
 import { isSupportedMarketplaceUrl, isSupportedProductUrl } from "../src/extension/page-rules";
@@ -210,13 +211,14 @@ function mountOverlay(container: HTMLElement): HTMLElement {
       </div>
       <div class="sa-data-preview">
         <div class="sa-data-preview-copy"><strong>采集预览</strong><span class="sa-data-preview-text">进入商品详情页后显示可识别信息。</span></div>
-        <button class="sa-preview-refresh" type="button">刷新</button>
+        <button class="sa-preview-refresh" type="button">读取预览</button>
       </div>
       <div class="sa-bridge-connection" role="status">自动采集通道：正在连接…</div>
       <div class="sa-form">
         <label class="sa-label" for="sa-task-select">加入到</label>
         <select id="sa-task-select" class="sa-select" aria-label="选择比较任务"></select>
         <button class="sa-button" type="button" disabled><span class="sa-spinner">⋯ </span><span class="sa-button-text">正在连接本机服务…</span></button>
+        <button class="sa-link-button sa-cancel-capture" type="button" hidden>取消本次读取</button>
         <div class="sa-status" role="status" aria-live="polite"></div>
       </div>
       <footer class="sa-footer">
@@ -243,6 +245,9 @@ async function mountProductAssistant(
   const statusElement = element<HTMLDivElement>(widget, ".sa-status");
   const openTaskButton = element<HTMLButtonElement>(widget, ".sa-open-task");
   const collapsedButton = element<HTMLButtonElement>(widget, ".sa-collapsed");
+  const cancelCaptureButton = element<HTMLButtonElement>(widget, ".sa-cancel-capture");
+  let captureAbort: AbortController | null = null;
+  cancelCaptureButton.addEventListener("click", () => captureAbort?.abort());
 
   let tasks: TaskSummary[] = [];
   let selectedTaskId = "new";
@@ -262,22 +267,15 @@ async function mountProductAssistant(
   async function pollResearchCapture(): Promise<"idle" | "captured" | "failed" | "busy"> {
     if (busy || bridgeBusy || Date.now() < bridgeNextPoll || !isSupportedProductUrl(location.href)) return "busy";
     bridgeBusy = true;
+    addButton.disabled = true;
     try {
       const result = await pollCaptureBridge({
         pageUrl: () => location.href,
         send: (message) => browser.runtime.sendMessage(message),
         capture: async (url) => {
-          // Report each stage: a silent stall between these steps was invisible before.
-          setStatus("正在展开规格参数…");
-          let expanded: string | null = null;
-          try {
-            expanded = await expandSpecPanel(document);
-          } catch (cause) {
-            // A failed expansion must not block the capture; record and continue.
-            setStatus(`展开规格参数失败：${cause instanceof Error ? cause.message : String(cause)}`);
-          }
-          setStatus(expanded ? `已展开“${expanded}”，正在读取页面…` : "无需展开，正在读取页面…");
-          return collectCurrentProductSnapshot(document, url, document.title);
+          const snapshot = await captureOpenedProduct(url, { scroll: false, status: setStatus });
+          capturePreviewElement.textContent = captureSummary(snapshot);
+          return snapshot;
         },
         status: (message) => setStatus(message),
       });
@@ -294,6 +292,7 @@ async function mountProductAssistant(
       return "failed";
     } finally {
       bridgeBusy = false;
+      addButton.disabled = busy || !isSupportedProductUrl(location.href) || !tasksLoaded;
     }
   }
 
@@ -319,11 +318,7 @@ async function mountProductAssistant(
       return;
     }
     const snapshot = collectCurrentProductSnapshot(document, url, document.title.trim());
-    const specCount = (snapshot.fields ?? []).filter((field) => field.field_path.startsWith("specs.")).length;
-    const loadedImages = (snapshot.images ?? []).filter((image) => image.status === "observed" && image.loaded).length;
-    const variant = snapshot.selected_variant.label || "规格待核对";
-    const price = snapshot.prices?.[0]?.raw_text || "价格未识别";
-    capturePreviewElement.textContent = `${variant} · ${price} · ${specCount} 项参数 · ${loadedImages} 张已加载图片。点击时会重新读取。`;
+    capturePreviewElement.textContent = captureSummary(snapshot);
   }
 
   function updatePage(): boolean {
@@ -345,7 +340,7 @@ async function mountProductAssistant(
     const isProduct = isMarketplace && isSupportedProductUrl(url);
     pageTitleElement.textContent = (isProduct ? getCurrentProductTitle(document, document.title) : document.title.trim()) || "当前商品页面";
     renderCapturePreview();
-    addButton.disabled = busy || !isProduct || !tasksLoaded;
+    addButton.disabled = busy || bridgeBusy || !isProduct || !tasksLoaded;
     if (!isMarketplace) setStatus("悬浮助手只在淘宝、天猫和京东页面可用。");
     else if (!isProduct) setStatus("请进入商品详情页后添加，购物车和订单页不会加入。");
     else if (!tasksLoaded) setStatus("正在读取本地比较任务…");
@@ -409,42 +404,72 @@ async function mountProductAssistant(
     else setStatus("点击后会加入商品，并保存可识别的规格、价格和图片来源。");
   });
 
-  element<HTMLButtonElement>(widget, ".sa-refresh").addEventListener("click", () => void loadTasks());
-  element<HTMLButtonElement>(widget, ".sa-preview-refresh").addEventListener("click", () => renderCapturePreview(true));
+  element<HTMLButtonElement>(widget, ".sa-refresh").addEventListener("click", () => {
+    if (!busy && !bridgeBusy) void loadTasks();
+  });
+  element<HTMLButtonElement>(widget, ".sa-preview-refresh").addEventListener("click", async () => {
+    if (busy || bridgeBusy || !isSupportedProductUrl(location.href)) return;
+    busy = true;
+    captureAbort = new AbortController();
+    addButton.disabled = true;
+    taskSelect.disabled = true;
+    cancelCaptureButton.hidden = false;
+    widget.classList.add("is-busy");
+    try {
+      const snapshot = await captureOpenedProduct(location.href, {
+        scroll: true, signal: captureAbort.signal, untilCutoff: true,
+        status: setStatus,
+      });
+      capturePreviewElement.textContent = captureSummary(snapshot);
+      setStatus("已在本地读取预览，尚未保存到任务。连接服务后可点击加入并采集。", "warning");
+    } catch (cause) {
+      setStatus(cause instanceof Error ? cause.message : "读取预览失败。", "error");
+    } finally {
+      busy = false;
+      captureAbort = null;
+      taskSelect.disabled = false;
+      cancelCaptureButton.hidden = true;
+      widget.classList.remove("is-busy");
+      addButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedProductUrl(location.href);
+    }
+  });
   element<HTMLButtonElement>(widget, ".sa-collapse").addEventListener("click", () => widget.classList.add("is-collapsed"));
   collapsedButton.addEventListener("click", () => widget.classList.remove("is-collapsed"));
 
   addButton.addEventListener("click", async () => {
     const url = location.href;
+    if (busy || bridgeBusy) return;
     if (!isSupportedProductUrl(url)) return updatePage();
-    const pageTitle = getCurrentProductTitle(document, document.title).slice(0, 512);
     const targetId = taskSelect.value === "new" ? null : taskSelect.value;
     const targetTitle = selectedTask()?.title ?? "新比较任务";
-    // Submitting a real snapshot: expand a collapsed parameter table first. A failure here
-    // must not prevent the snapshot from being taken.
-    try {
-      await expandSpecPanel(document);
-    } catch {
-      // Ignored on purpose: the snapshot below is still worth saving.
-    }
-    const capture: CaptureSnapshotSubmit = collectCurrentProductSnapshot(document, url, pageTitle);
-    const addSignature = JSON.stringify([url, pageTitle, targetId]);
-    if (addSignature !== requestSignature) {
-      requestSignature = addSignature;
-      requestKey = crypto.randomUUID();
-    }
-    const nextCaptureSignature = JSON.stringify({ ...capture, captured_at: "" });
-    if (nextCaptureSignature !== captureSignature) {
-      captureSignature = nextCaptureSignature;
-      captureKey = crypto.randomUUID();
-    }
-
     busy = true;
+    captureAbort = new AbortController();
     widget.classList.add("is-busy");
     addButton.disabled = true;
+    taskSelect.disabled = true;
+    cancelCaptureButton.hidden = false;
     openTaskButton.hidden = true;
-    setStatus("正在加入任务…");
     try {
+      const capture: CaptureSnapshotSubmit = await captureOpenedProduct(url, {
+        scroll: true, signal: captureAbort.signal, untilCutoff: true,
+        status: setStatus,
+      });
+      capturePreviewElement.textContent = captureSummary(capture);
+      const pageTitle = getCurrentProductTitle(document, document.title).slice(0, 512);
+      const addSignature = JSON.stringify([url, pageTitle, targetId]);
+      if (addSignature !== requestSignature) {
+        requestSignature = addSignature;
+        requestKey = crypto.randomUUID();
+      }
+      const nextCaptureSignature = JSON.stringify({ ...capture, captured_at: "" });
+      if (nextCaptureSignature !== captureSignature) {
+        captureSignature = nextCaptureSignature;
+        captureKey = crypto.randomUUID();
+      }
+      // Cancellation only applies before upload; after sending, the server may commit.
+      if (captureAbort.signal.aborted || location.href !== url) throw new Error("采集已取消或页面已变化，未提交快照。");
+      cancelCaptureButton.hidden = true;
+      setStatus("正在保存商品快照…");
       const response = (await browser.runtime.sendMessage({
         type: "shopping-agent:add-current-page",
         url,
@@ -480,8 +505,11 @@ async function mountProductAssistant(
       if (cause instanceof Error && cause.message.includes("任务不存在")) await loadTasks();
     } finally {
       busy = false;
+      captureAbort = null;
+      taskSelect.disabled = false;
+      cancelCaptureButton.hidden = true;
       widget.classList.remove("is-busy");
-      addButton.disabled = !isSupportedProductUrl(location.href) || !tasksLoaded;
+      addButton.disabled = bridgeBusy || !isSupportedProductUrl(location.href) || !tasksLoaded;
     }
   });
 
@@ -504,8 +532,57 @@ async function mountProductAssistant(
   // The service worker drives polling through an alarm, so a backgrounded tab still answers:
   // a timer in this page is frozen along with its tab. The local interval remains as a fast
   // path while the tab is in front.
-  browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     const request = message as { type?: string; url?: string } | null;
+    if (request?.type === "shopping-agent:capture-detail-screenshots") {
+      const senderUrl = sender.url ?? "";
+      if (sender.id !== browser.runtime.id || !senderUrl.startsWith(browser.runtime.getURL(""))) {
+        sendResponse({ ok: false, error: "请从扩展工具栏启动详情图读取。" });
+        return;
+      }
+      if (busy || bridgeBusy || !isSupportedProductUrl(location.href)) {
+        sendResponse({ ok: false, error: "当前页面正在处理其他采集，或不是支持的商品页。" });
+        return;
+      }
+      busy = true;
+      captureAbort = new AbortController();
+      addButton.disabled = true;
+      taskSelect.disabled = true;
+      cancelCaptureButton.hidden = false;
+      widget.classList.add("is-busy");
+      void captureOpenedProductWithScreenshots(location.href, {
+        scroll: true,
+        signal: captureAbort.signal,
+        untilCutoff: true,
+        status: setStatus,
+        captureVisibleTab: async () => {
+          const result = await browser.runtime.sendMessage({ type: "shopping-agent:capture-visible-tab" }) as {
+            ok?: boolean; screenshot_url?: string; error?: string;
+          };
+          if (!result?.ok || !result.screenshot_url) throw new Error(result?.error || "无法截取当前详情图区域。");
+          return result.screenshot_url;
+        },
+      }).then(({ result }) => {
+        if (location.href !== (message as { pageUrl?: string }).pageUrl) {
+          throw new Error("商品页已变化，详情截图未提交。");
+        }
+        sendResponse({
+          ok: true,
+          screenshots: result.screenshots,
+          reason: result.reason,
+        });
+      }).catch((cause: unknown) => {
+        sendResponse({ ok: false, error: cause instanceof Error ? cause.message : "详情图读取失败。" });
+      }).finally(() => {
+        busy = false;
+        captureAbort = null;
+        taskSelect.disabled = false;
+        cancelCaptureButton.hidden = true;
+        widget.classList.remove("is-busy");
+        addButton.disabled = bridgeBusy || !tasksLoaded || !isSupportedProductUrl(location.href);
+      });
+      return true;
+    }
     if (request?.type !== "shopping-agent:poll-capture-now") return;
     if (request.url && request.url !== location.href) {
       sendResponse({ ok: true, job: null });

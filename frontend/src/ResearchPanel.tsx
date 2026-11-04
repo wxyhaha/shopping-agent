@@ -199,7 +199,16 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
     const output = event.data.output as { access_code?: string | null } | undefined;
     return event.kind === "tool" && output?.access_code === "risk_control";
   }).map((event) => String((event.data.input as { item_id: string }).item_id)));
-  const loginItemIds = blockedItemIds.filter((itemId) => !riskBlockedItemIds.has(itemId));
+  const jdPaused = collectorQuery.data?.jd_background_enabled === false;
+  const nonJdItemIds = new Set((connectionsQuery.data ?? []).filter((item) => {
+    try {
+      const host = new URL(item.page_url || "").hostname;
+      return host !== "jd.com" && !host.endsWith(".jd.com");
+    }
+    catch { return false; }
+  }).map((item) => item.item_id));
+  const loginItemIds = blockedItemIds.filter((itemId) => !riskBlockedItemIds.has(itemId) &&
+    (!jdPaused || nonJdItemIds.has(itemId)));
   const riskItemIds = blockedItemIds.filter((itemId) => riskBlockedItemIds.has(itemId));
 
   function submit(event: FormEvent) {
@@ -217,7 +226,7 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
       <Input.TextArea id="research-goal" value={goal} onChange={(event) => setGoal(event.target.value)}
         placeholder="例如：这两款网线哪款适合家用？请先核对长度、材质和所选规格，信息不足时向我确认。"
         autoSize={{ minRows: 3, maxRows: 7 }} maxLength={4000} disabled={hasActive} />
-      <div className="research-start-row"><small>开始后，需求及商品文字证据会发送到你配置的 AI 网关。助手会按需打开商品链接、核验规格和价格；要求寻找替代品时，会搜索淘宝或京东并将候选加入任务逐项核实。遇到登录、验证或规格歧义时会请你接管；图片内容阅读尚未接入。</small>
+      <div className="research-start-row"><small>开始后，需求及已读取的商品证据会发送到你配置的 AI 网关。助手使用已启用的采集与搜索通道核验资料；暂停的平台会保留缺项。详情图阅读以实际识别结果为准，缺失资料不会自动补成商品事实。</small>
         <Button type="primary" htmlType="submit" loading={start.isPending} disabled={hasActive || goal.trim().length < 2 || runsQuery.isLoading || runsQuery.isError}>开始研究</Button>
       </div>
     </form>
@@ -225,6 +234,9 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
       type={collectorQuery.data.available ? "info" : "warning"}
       message={collectorQuery.data.available ? "后台采集已配置 · 无需打开商品页" : "后台采集环境尚未就绪"}
       description={collectorQuery.data.available ? "研究时按需启动独立浏览器，不共享日常浏览器登录态。实际访问结果会显示在研究记录中。" : "请按运行说明安装后台 Chromium 和共享采集器，或使用扩展接管。"} />}
+    {jdPaused && <Alert className="form-alert" type="info" showIcon
+      message="京东自动访问已暂停"
+      description="本次不会自动打开京东商品、搜索页或登录窗口。可先使用已有记录；缺少资料时等待平台恢复或补充已有资料，不需要反复尝试登录。" />}
     {collectorQuery.isError && <Alert className="form-alert" type="warning" showIcon message="无法核对后台采集环境，请确认后台已更新。" />}
     {connectionsQuery.data && <details><summary>扩展接管通道（可选）</summary>
       <div>{connectionsQuery.data.map((item, index) => <div key={item.item_id}>
