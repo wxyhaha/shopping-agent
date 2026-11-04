@@ -31,7 +31,7 @@ from app.agent_schemas import (
 from app.background_collector import BackgroundCollector
 from app.browser_capture import TERMINAL, aware, cancel_capture_jobs, create_capture_job
 from app.config import get_settings
-from app.evidence_search import detail_research_summary, search_detail_evidence
+from app.evidence_search import detail_kind, detail_research_summary, search_detail_evidence
 from app.models import AgentRun, BrowserCaptureJob, CaptureSnapshot, ProductItem, Task, utc_now
 from app.price_comparison import calculate_price_comparisons
 from app.product_search import ProductSearch
@@ -98,7 +98,10 @@ price_binding=same_page_state 只表示规格选中后同页价格在等待期�
 搜索候选全部不合格或待核实时，针对替代搜索的报告 outcome 使用 needs_evidence，解释具体差异。
 价格计算只能证明价格维度，不能替代品牌、用途与硬条件核验。
 不要声称执行了未提供的操作，也不要由图片 URL 推断参数。
-来源为 detail_image_vision 的证据是详情图文字，属商家标注，不是已核实事实，不能写进规格参数表。
+detail_images.* 字段是从商品详情图中识别出的商家文字，属商家标注，
+不是已核实事实，不能写进规格参数表。
+它们的 evidence 来源可能是 detail_image_vision（后台识别）或 extension_screenshot（扩展截图）；
+引用必须使用字段给出的 ref，不能把截图来源当成独立测量或第三方证明。
 详情图内容分三类：detail_images.parameter_* 是商品属性描述（材质、结构、形态、尺寸、性能、型号），
 可作为商品特征说明；detail_images.claim_* 是评价、比较、荣誉、代言、口号或认证名称，
 只能作为商家说法提及；detail_images.policy_* 是售后、配送、优惠或购买限制，写入购买条件一节。
@@ -289,13 +292,19 @@ def evidence_version(snapshot: CaptureSnapshot) -> str:
 
 def image_read_note(snapshot: CaptureSnapshot) -> str:
     count = sum(
-        entry.get("source") == "detail_image_vision"
-        for entry in snapshot.payload.get("evidence", [])
+        detail_kind(str(field.get("field_path") or "")) is not None
+        and bool(str(field.get("raw_value") or "").strip())
+        for field in snapshot.payload.get("fields", [])
     )
     if count:
+        pending = (
+            "当前仍有识别工作进行中；"
+            if snapshot.detail_enrichment == "pending"
+            else ""
+        )
         return (
-            f"已取得 {count} 张详情图的文字识别结果，属商家表述，未经独立核实；"
-            "读取覆盖与失败见 coverage，不能推断其余图片已读取。"
+            f"已取得 {count} 条详情图文字识别结果，属商家表述，未经独立核实；"
+            f"{pending}读取覆盖与失败见 coverage，不能推断其余图片已读取。"
         )
     if snapshot.detail_enrichment == "pending":
         return "详情图文字识别尚未完成；图片来源和尺寸不能证明图片中的规格。"
@@ -682,12 +691,17 @@ class ResearchRuntime(SearchRuntimeMixin):
         if matches and len({tuple(match["refs"]) for match in matches}) == 1:
             shared = matches[0]["refs"]
             matches = [{"text": match["text"], "kind": match["kind"]} for match in matches]
+        evidence_by_ref = {
+            f"{snapshot.id}:{entry.get('evidence_id')}": entry
+            for entry in snapshot.payload.get("evidence", [])
+            if entry.get("evidence_id")
+        }
         refs: dict[str, dict] = {
             ref: {
                 "snapshot_id": snapshot.id,
                 "item_id": item_id,
-                "source": "detail_image_vision",
-                "field_path": "detail_images",
+                "source": evidence_by_ref.get(ref, {}).get("source", "unknown"),
+                "field_path": evidence_by_ref.get(ref, {}).get("field_path", "detail_images"),
                 "capture_status": snapshot.status,
             }
             for ref in shared

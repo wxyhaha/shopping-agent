@@ -27,7 +27,7 @@ _MAX_CLAIM_EXAMPLES = 5
 _MAX_SHARED_REFS = 6
 
 DETAIL_REFERENCE_NOTE = (
-    "各条识别结果同属详情图证据组，引用时使用 evidence 中 source=detail_image_vision 的 ref。"
+    "各条识别结果同属详情图证据组，按引用数组定位到 evidence 中对应的详情图或扩展截图。"
 )
 
 
