@@ -40,9 +40,10 @@ export function listResearch(taskId: string): Promise<ResearchRun[]> {
   return request(`/tasks/${encodeURIComponent(taskId)}/research?limit=5`);
 }
 
-export function startResearch(taskId: string, goal: string, key: string): Promise<ResearchRun> {
+export function startResearch(taskId: string, goal: string, key: string, parentRunId?: string): Promise<ResearchRun> {
   return request(`/tasks/${encodeURIComponent(taskId)}/research`, {
-    method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify({ goal }),
+    method: "POST", headers: { "Idempotency-Key": key },
+    body: JSON.stringify({ goal, ...(parentRunId ? { parent_run_id: parentRunId } : {}) }),
   });
 }
 

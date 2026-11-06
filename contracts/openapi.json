@@ -3325,6 +3325,17 @@
             "type": "string",
             "title": "Task Id"
           },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
+          },
           "goal": {
             "type": "string",
             "title": "Goal"
@@ -3399,6 +3410,7 @@
         "required": [
           "id",
           "task_id",
+          "parent_run_id",
           "goal",
           "status",
           "model",
@@ -3472,6 +3484,19 @@
             "maxLength": 4000,
             "minLength": 2,
             "title": "Goal"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 36,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
           }
         },
         "additionalProperties": false,

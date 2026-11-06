@@ -9,7 +9,7 @@ from sqlalchemy import URL
 
 from app.agent_schemas import ResearchReport
 from app.main import create_app
-from app.models import CaptureSnapshot, utc_now
+from app.models import AgentRun, CaptureSnapshot, utc_now
 from app.research_agent import AgentFailure, ResearchRuntime
 
 
@@ -156,6 +156,43 @@ def test_pause_restart_resume_preserves_tool_context(tmp_path, configured):
 
     with sqlite3.connect(tmp_path / "agent_checkpoints.sqlite3") as connection:
         assert connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0] == 0
+
+
+def test_interrupted_run_resumes_saved_human_checkpoint(tmp_path, configured):
+    def model(messages, _):
+        seen = observations(messages)
+        if not seen:
+            return tool("read_product_evidence", {"item_id": task_items(messages)[0]["item_id"]})
+        if not any("answer" in result for result in seen):
+            return tool(
+                "ask_user", {"question": "需要多长的网线？", "reason": "长度影响规格和价格。"}
+            )
+        return tool("submit_report", report(seen[0]["evidence"][0]["ref"]))
+
+    path = tmp_path / "interrupted.sqlite3"
+    with TestClient(application(path, model)) as client:
+        task_id = seed(client)
+        assert start(client, task_id).status_code == 202
+        paused = wait_run(client, task_id, {"needs_input"})
+        # 模拟检查点已落盘、运行表状态尚未来得及从 running 更新为 needs_input 时进程中断。
+        with client.app.state.session_factory() as session:
+            run = session.get(AgentRun, paused["id"])
+            run.status = "running"
+            session.commit()
+
+    with TestClient(application(path, model)) as client:
+        interrupted = client.get(f"/api/v1/tasks/{task_id}/research").json()[0]
+        assert interrupted["status"] == "interrupted"
+        assert "服务重启中断" in interrupted["error"]
+        response = client.post(
+            f"/api/v1/tasks/{task_id}/research/{interrupted['id']}/resume",
+            json={"answer": "需要15米，价格还未确认。"},
+        )
+        assert response.status_code == 202
+        completed = wait_run(client, task_id, {"completed"})
+        assert completed["report"]["findings"][0]["evidence_refs"]
+        assert any(event["kind"] == "answer" for event in completed["events"])
+        assert sum(event["kind"] == "model" for event in completed["events"]) == 4
 
 
 def test_invalid_citation_is_returned_to_model_before_acceptance(tmp_path, configured):

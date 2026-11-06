@@ -96,6 +96,7 @@ class AgentRun(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     goal: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(24), default="queued")
     model: Mapped[str] = mapped_column(String(120))

@@ -1,4 +1,5 @@
 import hashlib
+import json
 from typing import Annotated
 from uuid import uuid4
 
@@ -14,7 +15,6 @@ from app.research_agent import AgentFailure
 from app.routes import (
     IdempotencyHeader,
     SessionDependency,
-    canonical_payload,
     validate_idempotency_key,
 )
 
@@ -38,7 +38,11 @@ def start_research(
     idempotency_key: IdempotencyHeader = None,
 ) -> ResearchRunRead:
     key = validate_idempotency_key(idempotency_key)
-    digest = hashlib.sha256(f"{task_id}:{canonical_payload(payload)}".encode()).hexdigest()
+    request_fields = payload.model_dump(mode="json", exclude_unset=True)
+    serialized = json.dumps(
+        request_fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    digest = hashlib.sha256(f"{task_id}:{serialized}".encode()).hexdigest()
     existing = session.scalar(select(AgentRun).where(AgentRun.idempotency_key == key))
     if existing:
         if existing.request_hash != digest:
@@ -48,6 +52,10 @@ def start_research(
     task = session.get(Task, task_id)
     if not task:
         raise HTTPException(404, "比较任务不存在。")
+    if payload.parent_run_id:
+        parent = find_run(session, task_id, payload.parent_run_id)
+        if parent.status != "completed" or not parent.report:
+            raise HTTPException(409, "只能从已有完整报告的研究继续追问。")
     if not task.items:
         raise HTTPException(422, "请先添加需要研究的商品。")
     settings = get_settings()
@@ -58,6 +66,7 @@ def start_research(
     run = AgentRun(
         id=str(uuid4()),
         task_id=task_id,
+        parent_run_id=payload.parent_run_id,
         goal=payload.goal,
         model=settings.llm_model,
         status="queued",

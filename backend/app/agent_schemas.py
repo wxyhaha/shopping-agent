@@ -17,6 +17,7 @@ def normalize_model_text(value: str) -> str:
 
 class StartResearchRequest(StrictModel):
     goal: str = Field(min_length=2, max_length=4000)
+    parent_run_id: str | None = Field(default=None, min_length=1, max_length=36)
 
 
 class ResumeResearchRequest(StrictModel):
@@ -166,6 +167,7 @@ class ResearchRunRead(BaseModel):
 
     id: str
     task_id: str
+    parent_run_id: str | None
     goal: str
     status: Literal[
         "queued", "running", "needs_input", "interrupted", "completed", "failed", "cancelled"

@@ -118,7 +118,19 @@ error_code 为 risk_control 表示平台风控拦截，不是登录或验证问�
 只有用户明确表示已正常打开商品页并愿意用扩展接管时，才调用 capture_product_page；
 资料仍不足则提交 needs_evidence，不把停用或缺失当成商品不具备某属性。
 每次只调用一个工具。每条 finding 必须引用工具实际返回的完整 evidence ref，
-不能把页面 SKU 编号当作已确认的规格。完成后调用 submit_report，给出有依据的取舍与未知项。
+不能把页面 SKU 编号当作已确认的规格。每条 finding 的每个商品事实都要有直接支持同一商品、同一属性的引用；
+不要用无关参数的引用为相机等其他结论背书。没有直接证据时说明快照未记录或仍未知，不推断属性不存在。
+页面记录为“0”的参数只按页面原文报告；除非页面明确说明该值含义，否则不能据此断定硬件不存在。
+若用户给出预算，必须区分“页面展示金额低于预算”和“确认符合预算”。券后、补贴后、会员价及带条件的价格，
+在优惠资格、价格与当前 SKU 的绑定及最终支付额均未核验前，只能写“页面显示金额低于预算”，
+必须将实际是否符合预算列为未知，不能写“在预算内”“符合预算”或“可买”。即使页面已观察到选中规格，
+也不能自动证明旁边展示的价格对应此规格；工具明确返回 price_binding=same_page_state 后才可说明页面状态价与所选规格关联，
+仍不能把优惠展示价说成最终支付价。券/补贴条件未记录时，不得假设用户有资格。
+完成后调用 submit_report，给出有依据的取舍与未知项。
+若输入包含 continuation，它是用户主动延续的上一轮运行上下文：上一轮目标是此前的用户请求，
+但其中明确标为测试的指令不代表真实偏好；续问链内的用户回答是用户陈述，优先用于理解实际需求。
+上一轮报告是模型生成的待核实结论。上下文只用于理解追问，不是本轮商品证据。
+回答前仍要读取相关商品的本轮证据，所有新报告发现只引用本轮工具返回的 evidence ref，不复用上一轮 ref。
 报告要让用户可以据此做选择，而不是重复商品标题。summary 使用 2–4 个短段落，先直接回答，
 再明确本次比较的已选规格和适用范围。有同规格、同价格口径证据时，给出页面价格差额；
 只有双方存在相同且已核验的计量维度时，才比较该维度的单位价；不得跨重量、容量、长度等维度换算。
@@ -130,6 +142,9 @@ SKU/标题中出现的材质或性能词属于页面选项文案，除非有独�
 差价百分比以较高的页面标价为分母，并明确写出计算口径。只获得价格证据时，
 只能说“页面标价维度更有优势”，不能把价格更低直接概括为整体性价比更高，
 也不能暗示优惠前价就是最终支付价。
+summary 只总结有引用的 findings 和用户陈述，不得引入 findings 未列出的处理器、刷新率、相机参数、价格条件等新商品事实。
+若需求涉及真实体验但快照只有规格，推荐必须明确限定为“参数层面的候选/优先核验对象”，
+不能写成已经证实拍照、续航或整体购买体验更好。
 finding 应覆盖每件商品的关键已核事实；条件允许时，单列双方可直接比较的差异并引用双方证据。
 优先解释规格、价格差距及对用户目标的意义，不要堆砌无关页面文案。
 unknowns 只列会影响购买决定的具体未知项。
@@ -1422,6 +1437,56 @@ class ResearchRuntime(SearchRuntimeMixin):
                     for item in task.items
                 ]
                 goal, task_id, model = run.goal, run.task_id, run.model
+                continuation = None
+                if run.parent_run_id:
+                    parent = session.get(AgentRun, run.parent_run_id)
+                    if parent and parent.task_id == run.task_id and parent.report:
+                        inherited_answers_newest_first = []
+                        ancestor = parent
+                        visited_ancestor_ids = set()
+                        while (
+                            ancestor
+                            and ancestor.task_id == run.task_id
+                            and ancestor.id not in visited_ancestor_ids
+                        ):
+                            visited_ancestor_ids.add(ancestor.id)
+                            for event in reversed(ancestor.events):
+                                event_data = event.get("data") or {}
+                                if (
+                                    event.get("kind") == "answer"
+                                    and event_data.get("source") == "user_statement"
+                                ):
+                                    inherited_answers_newest_first.append(
+                                        {
+                                            "answer": str(event_data.get("answer", ""))[:4000],
+                                            "source": "user_statement",
+                                        }
+                                    )
+                                    if len(inherited_answers_newest_first) >= 3:
+                                        break
+                            if len(inherited_answers_newest_first) >= 3 or not ancestor.parent_run_id:
+                                break
+                            ancestor = session.get(AgentRun, ancestor.parent_run_id)
+                        user_statements = list(reversed(inherited_answers_newest_first))
+                        continuation = {
+                            "run_id": parent.id,
+                            "goal": parent.goal[:4000],
+                            "user_statements": user_statements,
+                            "report": {
+                                "summary": str(parent.report.get("summary", ""))[:2400],
+                                "findings": [
+                                    {
+                                        "text": str(finding.get("text", ""))[:800],
+                                        "evidence_refs": finding.get("evidence_refs", [])[:20],
+                                    }
+                                    for finding in parent.report.get("findings", [])[:12]
+                                ],
+                                "unknowns": [
+                                    str(value)[:300]
+                                    for value in parent.report.get("unknowns", [])[:10]
+                                ],
+                            },
+                        }
                 session.commit()
             connection = sqlite3.connect(
                 str(self.checkpoint_path) if self.checkpoint_path else ":memory:",
@@ -1444,7 +1509,8 @@ class ResearchRuntime(SearchRuntimeMixin):
                         {
                             "role": "user",
                             "content": json.dumps(
-                                {"goal": goal, "items": manifest}, ensure_ascii=False
+                                {"goal": goal, "items": manifest, "continuation": continuation},
+                                ensure_ascii=False,
                             ),
                         },
                     ],

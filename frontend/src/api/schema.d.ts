@@ -905,6 +905,8 @@ export interface components {
             id: string;
             /** Task Id */
             task_id: string;
+            /** Parent Run Id */
+            parent_run_id: string | null;
             /** Goal */
             goal: string;
             /**
@@ -949,6 +951,8 @@ export interface components {
         StartResearchRequest: {
             /** Goal */
             goal: string;
+            /** Parent Run Id */
+            parent_run_id?: string | null;
         };
         /** TaskRead */
         TaskRead: {

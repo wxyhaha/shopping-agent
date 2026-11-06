@@ -151,9 +151,11 @@ function RunResult({ run }: { run: Run }) {
 export function ResearchPanel({ taskId }: { taskId: string }) {
   const queryClient = useQueryClient();
   const [goal, setGoal] = useState("");
+  const [followUp, setFollowUp] = useState("");
   const [answer, setAnswer] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
   const requestRef = useRef({ goal: "", key: "" });
+  const followUpRequestRef = useRef({ goal: "", parentRunId: "", key: "" });
   const queryKey = ["research", taskId];
   const collectorQuery = useQuery({ queryKey: ["collection-status"], queryFn: getCollectionStatus });
   const connectionsQuery = useQuery({ queryKey: ["browser-connections", taskId],
@@ -163,8 +165,11 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
     refetchInterval: (query) => query.state.data?.some((run) => ["queued", "running"].includes(run.status)) ? 2000 : false,
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey });
-  const start = useMutation({ mutationFn: ({ goal, key }: { goal: string; key: string }) => startResearch(taskId, goal, key),
-    onSuccess: async (run) => { setSelectedId(run.id); requestRef.current = { goal: "", key: "" }; await refresh(); },
+  const start = useMutation({ mutationFn: ({ goal, key, parentRunId }: { goal: string; key: string; parentRunId?: string }) => startResearch(taskId, goal, key, parentRunId),
+    onSuccess: async (run) => {
+      setSelectedId(run.id); setFollowUp(""); requestRef.current = { goal: "", key: "" };
+      followUpRequestRef.current = { goal: "", parentRunId: "", key: "" }; await refresh();
+    },
   });
   const resume = useMutation({ mutationFn: ({ id, answer }: { id: string; answer?: string }) => resumeResearch(taskId, id, answer),
     onSuccess: async () => { setAnswer(""); await refresh(); },
@@ -219,6 +224,16 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
     start.mutate(requestRef.current);
   }
 
+  function submitFollowUp(event: FormEvent) {
+    event.preventDefault();
+    const text = followUp.trim();
+    if (text.length < 2 || !run?.id) return;
+    if (followUpRequestRef.current.goal !== text || followUpRequestRef.current.parentRunId !== run.id) {
+      followUpRequestRef.current = { goal: text, parentRunId: run.id, key: createIdempotencyKey() };
+    }
+    start.mutate({ goal: text, parentRunId: run.id, key: followUpRequestRef.current.key });
+  }
+
   return <section className="research-panel" aria-label="购物研究助手">
     <div className="section-heading"><div><span className="step-label">围绕需求研究商品</span><h2>购物研究助手</h2></div></div>
     <form onSubmit={submit}>
@@ -246,8 +261,9 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
         {item.page_url && <a href={item.page_url} target="_blank" rel="noreferrer" style={{ marginLeft: 8 }}>打开商品页 ↗</a>}
       </div>)}<small>仅扩展接管时需要保持商品页打开；后台采集不依赖此连接。</small></div></details>}
     {error instanceof Error && <Alert type="error" showIcon message={error.message} />}
-    {runs.length > 1 && <Select className="research-history" value={run?.id} onChange={(id) => { setSelectedId(id); setAnswer(""); }}
-      aria-label="选择研究记录" options={runs.map((item) => ({ value: item.id, label: `${STATUS[item.status]} · ${item.goal.slice(0, 40)}` }))} />}
+    {runs.length > 1 && <Select className="research-history" value={run?.id} onChange={(id) => { setSelectedId(id); setAnswer(""); setFollowUp(""); }}
+      aria-label="选择研究记录" options={runs.map((item) => ({ value: item.id,
+        label: `${item.parent_run_id ? "追问 · " : ""}${STATUS[item.status]} · ${item.goal.slice(0, 40)}` }))} />}
     {run && <div className="research-run">
       <div className="research-run-heading"><Tag color={run.status === "needs_input" || run.report?.outcome === "needs_evidence" ? "orange" : run.status === "failed" ? "red" : run.status === "completed" ? "green" : "blue"}>{run.status === "completed" && run.report?.outcome === "needs_evidence" ? "阶段性结果 · 资料不足" : STATUS[run.status]}</Tag>
         <span>{run.goal}</span>
@@ -273,6 +289,17 @@ export function ResearchPanel({ taskId }: { taskId: string }) {
       {!run.question && ["failed", "interrupted"].includes(run.status) && <Button onClick={() => resume.mutate({ id: run.id })} loading={resume.isPending}>从检查点继续</Button>}
       {run.events.length > 0 && <ResearchTimeline run={run} />}
       <RunResult run={run} />
+      {run.status === "completed" && run.report && <form className="research-follow-up" onSubmit={submitFollowUp}>
+        <label htmlFor="research-follow-up">继续追问这一轮</label>
+        <Input.TextArea id="research-follow-up" value={followUp} onChange={(event) => setFollowUp(event.target.value)}
+          placeholder="例如：为什么推荐这款？它还有哪些需要注意的地方？"
+          autoSize={{ minRows: 2, maxRows: 5 }} maxLength={2000} disabled={hasActive || start.isPending} />
+        <div className="research-follow-up-row">
+          <small>会新建一条研究记录，并带入本轮报告和你的回答作为上下文；商品事实会依据本轮读取的证据重新核对。</small>
+          <Button type="primary" htmlType="submit" loading={start.isPending}
+            disabled={hasActive || followUp.trim().length < 2}>继续追问</Button>
+        </div>
+      </form>}
       <ResearchSearch run={run} />
     </div>}
   </section>;

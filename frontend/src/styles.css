@@ -285,6 +285,10 @@ button.side-empty { border: 0; background: transparent; cursor: pointer; text-al
 .research-question { padding: 18px; background: #fff8e8; border-radius: 10px; margin: 16px 0; }
 .research-question p { color: #746449; }
 .research-question button { margin-top: 12px; }
+.research-follow-up { margin-top: 20px; padding: 18px; border: 1px solid #dce8dd; border-radius: 10px; background: #f7faf7; }
+.research-follow-up > label { display: block; margin-bottom: 9px; color: #33483a; font-weight: 600; }
+.research-follow-up-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; }
+.research-follow-up-row small { color: #718076; line-height: 1.55; }
 .research-process { margin: 22px 0; }
 .research-process-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
 .research-process-heading h3 { margin: 0 0 3px; font-size: 16px; }
