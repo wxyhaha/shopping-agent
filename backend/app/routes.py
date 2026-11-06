@@ -548,8 +548,7 @@ def list_capture_snapshots(
                             "screenshots": {
                                 "type": "array",
                                 "description": (
-                                    "单次请求最多 16 段；同一快照可在前一批识别完成后"
-                                    "继续上传。"
+                                    "单次请求最多 16 段；同一快照可在前一批识别完成后继续上传。"
                                 ),
                                 "minItems": 1,
                                 "maxItems": 16,
@@ -616,9 +615,7 @@ def upload_detail_screenshots(
             or not content.endswith(b"\xff\xd9")
         ):
             raise HTTPException(status_code=422, detail="只接受大小受限的 JPEG 详情图截图。")
-        decoded.append(
-            {"position": frame.position, "scroll_y": frame.scroll_y, "content": content}
-        )
+        decoded.append({"position": frame.position, "scroll_y": frame.scroll_y, "content": content})
 
     item = session.scalar(
         select(ProductItem).where(ProductItem.id == item_id, ProductItem.task_id == task_id)
@@ -640,9 +637,7 @@ def upload_detail_screenshots(
             identity is None or identity.platform not in {"taobao", "tmall"}
             for identity in identities
         )
-        or len(
-            {(identity.platform, identity.product_id) for identity in identities if identity}
-        )
+        or len({(identity.platform, identity.product_id) for identity in identities if identity})
         != 1
     ):
         raise HTTPException(status_code=422, detail="截图页面必须与已保存的淘宝或天猫商品一致。")

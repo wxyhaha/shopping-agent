@@ -224,10 +224,10 @@ def enrich_detail_screenshots(
         )
     else:
         coverage[:] = [
-            entry for entry in coverage
+            entry
+            for entry in coverage
             if not (
-                entry.get("field_path") == "detail_images.text"
-                and entry.get("status") == "missing"
+                entry.get("field_path") == "detail_images.text" and entry.get("status") == "missing"
             )
         ]
     return snapshot

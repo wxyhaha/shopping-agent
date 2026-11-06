@@ -838,13 +838,15 @@ var ShoppingAgentCollector = (function(exports) {
 		};
 	}
 	// src/extension/capture-preparation.ts
-	/** A bounded observation, never a promise that the whole product page was read. */
+	/** Observe the page until the known cutoff or the caller's optional safety budget. */
 	async function prepareDetails(host, options = { scroll: true }) {
-		const deadline = host.now() + Math.min(12e3, Math.max(0, options.budgetMs ?? 12e3));
-		const maxSteps = Math.min(24, Math.max(0, options.maxSteps ?? 24));
+		const deadline = options.untilCutoff ? Number.POSITIVE_INFINITY : host.now() + Math.min(3e4, Math.max(0, options.budgetMs ?? 12e3));
+		const maxSteps = options.untilCutoff ? Number.POSITIVE_INFINITY : Math.min(24, Math.max(0, options.maxSteps ?? 24));
 		let steps = 0;
 		let previous = "";
 		let stableSince = host.now();
+		let startedAtDetail = false;
+		const capturedPositions = /* @__PURE__ */ new Set();
 		try {
 			host.check();
 			if (!options.scroll) return {
@@ -854,23 +856,50 @@ var ShoppingAgentCollector = (function(exports) {
 			};
 			while (true) {
 				host.check();
-				const detail = host.inspect();
+				let detail = host.inspect();
+				if (detail.found && !startedAtDetail) {
+					host.startAtDetail?.();
+					startedAtDetail = true;
+					detail = host.inspect();
+				}
 				if (detail.signature !== previous || !detail.atEnd || detail.pending > 0) {
 					previous = detail.signature;
 					stableSince = host.now();
 				}
-				if (detail.found && detail.atEnd && !detail.pending && host.now() - stableSince >= 1e3) return {
-					reason: "settled",
-					steps,
-					detail
-				};
+				if (host.captureViewport && detail.visibleLoaded > 0) {
+					const position = Math.round(detail.scrollY);
+					if (!capturedPositions.has(position)) {
+						const waitStarted = host.now();
+						while (detail.visiblePending > 0 && host.now() - waitStarted < 900) {
+							await host.wait(Math.min(250, deadline - host.now()));
+							detail = host.inspect();
+						}
+						if (detail.visibleLoaded > 0) {
+							await host.captureViewport(detail);
+							capturedPositions.add(position);
+						}
+					}
+				}
+				if (detail.found && detail.atEnd && !detail.pending && host.now() - stableSince >= 1e3) {
+					if (detail.positionedImages > 0 && detail.imageCutoffReached) return {
+						reason: "settled",
+						steps,
+						detail
+					};
+					if (detail.positionedImages === 0) return {
+						reason: "cutoff_not_found",
+						steps,
+						detail
+					};
+				}
 				if (host.now() >= deadline) return {
 					reason: "time_limit",
 					steps,
 					detail
 				};
-				host.status(`正在读取详情区：${detail.loaded} 张图片已加载，${detail.pending} 张待加载…`);
-				if (!detail.atEnd) {
+				const imagePosition = detail.lastImageBottom === null ? "未识别末图位置" : detail.imageCutoffReached ? "已到达当前最末图片位置" : `末图底边约 ${Math.round(detail.lastImageBottom)} px`;
+				host.status(`正在读取详情区：${detail.loaded} 张图片已加载，${detail.pending} 张待加载；${imagePosition}…`);
+				if (!(detail.atEnd && (detail.positionedImages === 0 || detail.imageCutoffReached))) {
 					if (steps >= maxSteps) return {
 						reason: "step_limit",
 						steps,
@@ -887,13 +916,13 @@ var ShoppingAgentCollector = (function(exports) {
 	}
 	function addPreparationCoverage(snapshot, result) {
 		const { detail, reason, steps } = result;
-		const conclusion = reason === "settled" ? "已滚动到已识别详情区末端，已发现图片在短暂观察期内稳定；不保证页面完整。" : reason === "read_only" ? "本次仅读取当前已加载内容，没有滚动加载详情。" : reason === "step_limit" ? "已达到滚动次数上限，后续详情可能尚未加载。" : "已达到等待期限，后续详情可能尚未加载。";
+		const conclusion = reason === "settled" ? "已到达已识别详情区域末端和最后一张已定位图片的底部，图片清单在短暂观察期内稳定；不保证页面完整。" : reason === "cutoff_not_found" ? "已到达识别区域末端，但没有找到可定位的详情图片，不能确认图片截止位置。" : reason === "read_only" ? "本次仅读取当前已加载内容，没有滚动加载详情。" : reason === "step_limit" ? "已达到滚动次数上限，后续详情可能尚未加载。" : "已达到等待期限，后续详情可能尚未加载。";
 		snapshot.coverage = (snapshot.coverage ?? []).filter((entry) => entry.field_path !== "page.detail_preparation");
 		snapshot.coverage.push({
 			field_path: "page.detail_preparation",
 			status: "ambiguous",
 			evidence_ids: [],
-			note: `${conclusion} ${detail.found ? "已识别详情区域" : "未识别详情区域"}；滚动 ${steps} 次；发现 ${detail.loaded} 张已加载、${detail.pending} 张待加载图片。图片文字识别单独处理。`
+			note: `${conclusion} ${detail.found ? "已识别详情区域" : "未识别详情区域"}；滚动 ${steps} 次；发现 ${detail.positionedImages} 张有位置的图片，其中 ${detail.loaded} 张已加载、${detail.pending} 张待加载、${detail.failedImages} 张加载失败；${detail.lastImageBottom === null ? "末图位置未知" : `末图底边约 ${Math.round(detail.lastImageBottom)} px`}。图片文字识别单独处理。`
 		});
 		if (snapshot.status === "complete") snapshot.status = "partial";
 		return snapshot;
@@ -964,8 +993,113 @@ var ShoppingAgentCollector = (function(exports) {
 		"[class*='detail-content']",
 		"#detail"
 	];
+	var SCREENSHOT_INTERVAL_MS = 650;
+	function isSamePageDocumentAddress(left, right) {
+		try {
+			const leftUrl = new URL(left);
+			const rightUrl = new URL(right);
+			leftUrl.hash = "";
+			rightUrl.hash = "";
+			return leftUrl.href === rightUrl.href;
+		} catch {
+			return false;
+		}
+	}
 	/** Read a user-opened page; no marketplace fetches, navigation, or SKU changes. */
 	async function captureOpenedProduct(pageUrl, options) {
+		return (await captureProduct(pageUrl, options)).snapshot;
+	}
+	async function cropVisibleDetailArea(screenshotUrl, detail) {
+		if (!detail.imageBounds || !screenshotUrl.startsWith("data:image/")) throw new Error("没有取得当前详情图区域截图，请从扩展工具栏重新开始。");
+		const image = document.createElement("img");
+		image.src = screenshotUrl;
+		await image.decode();
+		const scaleX = image.naturalWidth / detail.viewportWidth;
+		const scaleY = image.naturalHeight / detail.viewportHeight;
+		const left = Math.max(0, Math.floor(detail.imageBounds.x * scaleX));
+		const top = Math.max(0, Math.floor(detail.imageBounds.y * scaleY));
+		const right = Math.min(image.naturalWidth, Math.ceil((detail.imageBounds.x + detail.imageBounds.width) * scaleX));
+		const bottom = Math.min(image.naturalHeight, Math.ceil((detail.imageBounds.y + detail.imageBounds.height) * scaleY));
+		const sourceWidth = right - left;
+		const sourceHeight = bottom - top;
+		if (sourceWidth < 1 || sourceHeight < 1) throw new Error("详情图截图区域无效，请重新读取。");
+		let shrink = Math.min(1, 1280 / sourceWidth, 1600 / sourceHeight);
+		for (let attempt = 0; attempt < 5; attempt += 1) {
+			const canvas = document.createElement("canvas");
+			canvas.width = Math.max(1, Math.round(sourceWidth * shrink));
+			canvas.height = Math.max(1, Math.round(sourceHeight * shrink));
+			const context = canvas.getContext("2d");
+			if (!context) throw new Error("无法处理详情图截图，请稍后重试。");
+			context.drawImage(image, left, top, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
+			for (const quality of [
+				.78,
+				.66,
+				.54
+			]) {
+				const base64 = canvas.toDataURL("image/jpeg", quality).split(",", 2)[1] ?? "";
+				if (base64.length <= 65e4) return base64;
+			}
+			shrink *= .78;
+		}
+		throw new Error("详情图截图超过安全大小上限，请减少页面缩放后重试。");
+	}
+	function inspectDetailProgress(root, candidates, view) {
+		const observed = candidates.map((image) => {
+			return {
+				image,
+				rect: image.getBoundingClientRect(),
+				style: getComputedStyle(image),
+				source: image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || image.getAttribute("srcset") || ""
+			};
+		});
+		const positioned = observed.filter(({ rect, style }) => style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0);
+		const visible = positioned.filter(({ rect }) => rect.right > 0 && rect.bottom > 0 && rect.left < view.innerWidth && rect.top < view.innerHeight);
+		const ready = visible.filter(({ image }) => image.complete && image.naturalWidth > 0);
+		const rects = ready.map(({ rect }) => rect);
+		const bounds = rects.length ? {
+			x: Math.max(0, Math.min(...rects.map((rect) => rect.left))),
+			y: Math.max(0, Math.min(...rects.map((rect) => rect.top))),
+			width: Math.min(view.innerWidth, Math.max(...rects.map((rect) => rect.right))) - Math.max(0, Math.min(...rects.map((rect) => rect.left))),
+			height: Math.min(view.innerHeight, Math.max(...rects.map((rect) => rect.bottom))) - Math.max(0, Math.min(...rects.map((rect) => rect.top)))
+		} : null;
+		const rootRect = root?.getBoundingClientRect();
+		const bottom = rootRect ? rootRect.bottom : document.documentElement.scrollHeight - view.scrollY;
+		const lastImageBottom = positioned.length ? Math.max(...positioned.map(({ rect }) => rect.bottom + view.scrollY)) : null;
+		const imageCutoffReached = lastImageBottom !== null && lastImageBottom <= view.scrollY + view.innerHeight + 8;
+		const documentBottom = rootRect ? rootRect.bottom + view.scrollY : document.documentElement.scrollHeight;
+		return {
+			found: Boolean(root),
+			atEnd: bottom <= view.innerHeight + 8,
+			loaded: candidates.filter((image) => image.complete && image.naturalWidth > 0).length,
+			pending: candidates.filter((image) => !image.complete).length,
+			positionedImages: positioned.length,
+			failedImages: candidates.filter((image) => image.complete && image.naturalWidth === 0 && Boolean(image.currentSrc || image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original"))).length,
+			lastImageBottom,
+			imageCutoffReached,
+			visibleLoaded: ready.length,
+			visiblePending: visible.filter(({ image }) => !image.complete).length,
+			imageBounds: bounds && bounds.width > 0 && bounds.height > 0 ? bounds : null,
+			scrollY: view.scrollY,
+			viewportWidth: view.innerWidth,
+			viewportHeight: view.innerHeight,
+			signature: JSON.stringify([
+				Boolean(root),
+				Math.round(documentBottom),
+				Math.round(lastImageBottom ?? -1),
+				observed.map(({ image, rect, style, source }) => [
+					source,
+					image.complete,
+					image.naturalWidth,
+					Math.round(rect.bottom + view.scrollY),
+					Math.round(rect.width),
+					Math.round(rect.height),
+					style.display,
+					style.visibility
+				])
+			])
+		};
+	}
+	async function captureProduct(pageUrl, options) {
 		const view = document.defaultView;
 		const origin = {
 			x: view.scrollX,
@@ -974,9 +1108,22 @@ var ShoppingAgentCollector = (function(exports) {
 		const status = options.status ?? (() => {});
 		const selection = () => JSON.stringify(inspectVariants().groups.map((group) => [group.label, group.options.filter((option) => option.selected).map((option) => option.label)]));
 		const initialSelection = selection();
+		const screenshots = [];
+		let lastScreenshotAt = 0;
 		let interrupted = false;
+		let originRestored = false;
+		const restoreOrigin = () => {
+			if (originRestored || !options.scroll || interrupted && !options.signal?.aborted || !isSamePageDocumentAddress(location.href, pageUrl) || document.visibilityState !== "visible") return;
+			view.scrollTo({
+				left: origin.x,
+				top: origin.y,
+				behavior: "instant"
+			});
+			originRestored = true;
+		};
 		const interrupt = (event) => {
-			if (event.target instanceof Element && event.target.closest("shopping-agent-product-assistant")) return;
+			const assistantHost = document.querySelector("shopping-agent-product-assistant");
+			if (assistantHost && event.composedPath().includes(assistantHost)) return;
 			interrupted = true;
 		};
 		const interruptKey = (event) => {
@@ -992,7 +1139,7 @@ var ShoppingAgentCollector = (function(exports) {
 		};
 		const check = () => {
 			if (options.signal?.aborted) throw new Error("采集已取消，未提交商品快照。");
-			if (location.href !== pageUrl) throw new Error("商品页已变化，本次快照未提交，请在当前商品页重试。");
+			if (!isSamePageDocumentAddress(location.href, pageUrl)) throw new Error("商品页已变化，本次快照未提交，请在当前商品页重试。");
 			if (interrupted) throw new Error("检测到页面操作，采集已停止，请选好规格后重新读取。");
 			if (options.scroll && document.visibilityState !== "visible") throw new Error("商品页已切到后台，采集已停止，请回到此页重新读取。");
 			if (selection() !== initialSelection) throw new Error("选中规格在采集期间发生变化，请等待价格更新后重新读取。");
@@ -1007,27 +1154,27 @@ var ShoppingAgentCollector = (function(exports) {
 		};
 		const container = () => DETAIL_SELECTORS.map((selector) => document.querySelector(selector)).find((node) => node && node.getClientRects().length && getComputedStyle(node).visibility !== "hidden");
 		const images = () => Array.from(container()?.querySelectorAll("img") ?? []);
-		const inspect = () => {
-			const root = container();
-			const candidates = images();
-			const loaded = candidates.filter((image) => image.complete && image.naturalWidth > 0).length;
-			const bottom = root ? root.getBoundingClientRect().bottom : document.documentElement.scrollHeight - view.scrollY;
-			return {
-				found: Boolean(root),
-				atEnd: bottom <= view.innerHeight + 8,
-				loaded,
-				pending: candidates.length - loaded,
-				signature: JSON.stringify([
-					Boolean(root),
-					Math.round(bottom + view.scrollY),
-					candidates.map((image) => [
-						image.currentSrc || image.src,
-						image.complete,
-						image.naturalWidth
-					])
-				])
-			};
-		};
+		const inspect = () => inspectDetailProgress(container(), images(), view);
+		const captureViewport = options.captureVisibleTab ? async (detail) => {
+			if (!detail.imageBounds) return;
+			await wait(Math.max(0, SCREENSHOT_INTERVAL_MS - (performance.now() - lastScreenshotAt)));
+			check();
+			status(`正在截取详情图区域：第 ${screenshots.length + 1} 段…`);
+			const overlay = document.querySelector("shopping-agent-product-assistant");
+			const oldVisibility = overlay?.style.visibility;
+			if (overlay) overlay.style.visibility = "hidden";
+			try {
+				const image_base64 = await cropVisibleDetailArea(await options.captureVisibleTab(), detail);
+				screenshots.push({
+					position: screenshots.length + 1,
+					scroll_y: Math.max(0, Math.round(detail.scrollY)),
+					image_base64
+				});
+				lastScreenshotAt = performance.now();
+			} finally {
+				if (overlay) overlay.style.visibility = oldVisibility ?? "";
+			}
+		} : void 0;
 		const eventOptions = {
 			capture: true,
 			passive: true
@@ -1050,17 +1197,20 @@ var ShoppingAgentCollector = (function(exports) {
 				wait,
 				inspect,
 				status,
+				startAtDetail: () => {
+					const detailRoot = container();
+					if (detailRoot) view.scrollTo({
+						left: view.scrollX,
+						top: Math.max(0, detailRoot.getBoundingClientRect().top + view.scrollY),
+						behavior: "instant"
+					});
+				},
+				...captureViewport ? { captureViewport } : {},
 				advance: () => view.scrollTo({
 					top: view.scrollY + Math.max(200, view.innerHeight * .75),
 					behavior: "instant"
 				}),
-				restore: () => {
-					if (options.scroll && !interrupted && location.href === pageUrl && document.visibilityState === "visible") view.scrollTo({
-						left: origin.x,
-						top: origin.y,
-						behavior: "instant"
-					});
-				}
+				restore: restoreOrigin
 			}, options);
 			check();
 			status("正在核对选中规格和价格是否稳定…");
@@ -1078,8 +1228,13 @@ var ShoppingAgentCollector = (function(exports) {
 				])
 			]);
 			if (stamp(first) !== stamp(snapshot)) throw new Error("规格或价格仍在更新，本次快照未提交，请稍后重新读取。");
-			return addPreparationCoverage(snapshot, preparation);
+			return {
+				snapshot: addPreparationCoverage(snapshot, preparation),
+				screenshots,
+				reason: preparation.reason
+			};
 		} finally {
+			restoreOrigin();
 			view.removeEventListener("wheel", interrupt, true);
 			view.removeEventListener("touchstart", interrupt, true);
 			view.removeEventListener("pointerdown", interrupt, true);

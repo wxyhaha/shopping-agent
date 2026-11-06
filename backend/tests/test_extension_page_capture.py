@@ -130,7 +130,7 @@ def test_interruption_never_returns_a_snapshot(page, change):
             setTimeout(()=>{
               if(change==='cancel')abort.abort();
               if(change==='selection')document.querySelector('[aria-pressed]').setAttribute('aria-pressed','false');
-              if(change==='navigation')location.hash='changed';
+              if(change==='navigation')history.pushState({},'','/item.htm?id=100002');
               if(change==='wheel')dispatchEvent(new WheelEvent('wheel'));
             },150);
             return ShoppingAgentCollector.captureOpenedProduct(

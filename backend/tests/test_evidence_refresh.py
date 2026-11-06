@@ -91,7 +91,7 @@ def test_same_id_with_completed_image_read_refreshes_content(setup):
     assert updated["evidence_version"] != first["evidence_version"]
     assert updated.get("freshness") != "same_snapshot"
     assert updated["detail_parameters"] == ["电池6800mAh"]
-    assert "已取得 1 张" in updated["image_note"]
+    assert "已取得 1 条" in updated["image_note"]
     assert "未经独立核实" in updated["image_note"]
     assert any(ref.endswith(":detail-text-1") for ref in refs)
     repeated, refs = runtime._repeat_read(
